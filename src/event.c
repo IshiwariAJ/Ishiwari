@@ -122,8 +122,32 @@ void event_embed_zg(EventEmbed *e) {
     p_zg(&e->val_w);   p_zg(&e->val_b);
 }
 
-void event_embed_fwd(const EventSeq *s, const EventEmbed *e, Mat *out) {
+int event_embed_fwd(const EventSeq *s, const EventEmbed *e, Mat *out) {
     int D = e->D, n = s->n;
+    /* validate all event fields before touching any array */
+    for (int i = 0; i < n; i++) {
+        if (s->modality[i] < 0 || s->modality[i] >= EVENT_MAX_MOD) {
+            fprintf(stderr, "event_embed_fwd: modality[%d]=%d out of range [0,%d)\n",
+                    i, s->modality[i], EVENT_MAX_MOD);
+            return -1;
+        }
+        if (s->channel[i] < 0 || s->channel[i] >= EVENT_MAX_CHAN) {
+            fprintf(stderr, "event_embed_fwd: channel[%d]=%d out of range [0,%d)\n",
+                    i, s->channel[i], EVENT_MAX_CHAN);
+            return -1;
+        }
+        if (s->time_index[i] < 0 || s->time_index[i] >= e->max_time) {
+            fprintf(stderr, "event_embed_fwd: time_index[%d]=%d out of range [0,%d)\n",
+                    i, s->time_index[i], e->max_time);
+            return -1;
+        }
+        int tid = s->token_id[i];
+        if (tid != -1 && (tid < 0 || tid >= e->V)) {
+            fprintf(stderr, "event_embed_fwd: token_id[%d]=%d out of range [-1,%d)\n",
+                    i, tid, e->V);
+            return -1;
+        }
+    }
     for (int i = 0; i < n; i++) {
         float *dst  = out->d + i * D;
         int mod = s->modality[i];
@@ -148,6 +172,7 @@ void event_embed_fwd(const EventSeq *s, const EventEmbed *e, Mat *out) {
                        + m_emb[d] + c_emb[d] + p_enc[d];
         }
     }
+    return 0;
 }
 
 void event_embed_bwd(const EventSeq *s, const EventEmbed *e,
@@ -158,6 +183,12 @@ void event_embed_bwd(const EventSeq *s, const EventEmbed *e,
         int mod = s->modality[i];
         int ch  = s->channel[i];
         int tid = s->token_id[i];
+
+        /* skip if fields are out-of-range (mirrors event_embed_fwd validation) */
+        if (mod < 0 || mod >= EVENT_MAX_MOD)  continue;
+        if (ch  < 0 || ch  >= EVENT_MAX_CHAN) continue;
+        if (s->time_index[i] < 0 || s->time_index[i] >= e->max_time) continue;
+        if (tid != -1 && (tid < 0 || tid >= e->V)) continue;
 
         /* modality and channel embedding gradients (shared lookup) */
         float *dm_emb  = de->mod_emb.g  + mod * D;
@@ -227,3 +258,4 @@ void event_head_bwd(const EventHead *h, const Mat *hidden,
     mm_at_add(hidden, d_logits, &dproj);
     bias_bwd(d_logits, dh->proj_b.g);
 }
+

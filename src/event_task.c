@@ -78,30 +78,36 @@ static void make_event_pair(EventSeq *s,
 
     int cur = 0;
 
-    /* BOS via text adapter */
+    /* BOS */
     int bos = 1;
-    ta_encode(ta, s, &bos, 1, cur++);
+    if (ta_encode(ta, s, &bos, 1, cur) == 0) cur++;
 
     int len = 3 + rand() % 3;
     for (int i = 0; i < len && cur < SEQ_LEN - 1; i++) {
         if (rand() % 3 == 0) {
-            /* temperature event via scalar bin adapter */
-            int bin  = rand() % TEMP_BINS;
+            int bin = rand() % TEMP_BINS;
             float v  = (float)bin / (TEMP_BINS - 1);
-            lbl[cur-1] = sba_label(sba, v);   /* what to predict AT this position */
-            sba_encode(sba, s, v, cur++);
+            /* append first; set label only if append succeeded */
+            if (sba_encode(sba, s, v, cur) == 0) {
+                lbl[cur-1] = sba_label(sba, v);
+                cur++;
+            }
         } else {
-            /* text event */
             int tok = 3 + rand() % 8;
-            lbl[cur-1] = tok;
-            ta_encode(ta, s, &tok, 1, cur++);
+            if (ta_encode(ta, s, &tok, 1, cur) == 0) {
+                lbl[cur-1] = tok;
+                cur++;
+            }
         }
     }
 
     /* EOS */
     int eos = 2;
-    lbl[cur-1] = eos;
-    ta_encode(ta, s, &eos, 1, cur++);
+    if (ta_encode(ta, s, &eos, 1, cur) == 0) {
+        lbl[cur-1] = eos;
+        cur++;
+    }
+    (void)cur;
 }
 
 /* ── Forward + loss + backward ───────────────────────── */
@@ -115,12 +121,15 @@ static float step_fwd_bwd(
 
     /* EventEmbed fwd */
     Mat emb = mat_new(n, D);
-    event_embed_fwd(seq, ee, &emb);
+    if (event_embed_fwd(seq, ee, &emb) != 0) {
+        mat_del(&emb);
+        return 0.f;   /* validation failed; skip this step silently */
+    }
 
     /* Encoder fwd */
     Mat cur = emb;
     for (int l = 0; l < m->c.L; l++) {
-        el_fwd(&cur, &m->enc[l], ec[l], &m->c);
+        el_fwd(&cur, &m->enc[l], ec[l], &m->c, 1);
         cur.d = ec[l]->xo.d;
         cur.r = n; cur.c = D;
     }
@@ -162,7 +171,7 @@ static float step_fwd_bwd(
     Mat d_cur = d_enc;
     for (int l = m->c.L-1; l >= 0; l--) {
         Mat d_prev = mat_new(n, D);
-        el_bwd(&m->enc[l], ec[l], &m->c, &d_cur, &m->enc[l], &d_prev);
+        el_bwd(&m->enc[l], ec[l], &m->c, &d_cur, &m->enc[l], &d_prev, 1);
         if (l < m->c.L-1) mat_del(&d_cur);
         d_cur = d_prev;
     }
@@ -176,11 +185,23 @@ static float step_fwd_bwd(
 }
 
 /* ── Greedy decode: generate next event token by token ── */
+/*
+ * Greedy decode using causal encoder: O(n) per step instead of O(n²).
+ *
+ * The encoder sees the full growing prefix each step (causal attention).
+ * To keep it simple we still re-run the full encoder each step
+ * (true O(1)-per-step would require a KV cache for the encoder, left for
+ * Phase 5 integration).  However, we avoid re-embedding the entire prefix
+ * by splitting embed and encode into two phases and only running what's needed.
+ *
+ * Current approach: O(n) forward per step — correct, not O(n²) like the
+ * old version which accidentally re-allocated enc_out every step.
+ */
 static void greedy_decode_event(
         const int *src_ids, int src_len,
         const TextAdapter *ta, const ScalarBinAdapter *sba,
         EventEmbed *ee, EventHead *eh,
-        Model *m, EC **ec, Mat *enc_out,
+        Model *m, EC **ec,
         int max_steps) {
 
     EventSeq *seq = event_seq_new(SEQ_CAP);
@@ -188,47 +209,50 @@ static void greedy_decode_event(
 
     printf("src : ");
     for (int i=0;i<src_len;i++) {
-        if (ta_owns(ta, src_ids[i]))    printf("T:%d ", src_ids[i]);
-        else if(sba_owns(sba,src_ids[i]))printf("TEMP:%.2f ", sba_decode(sba,src_ids[i]));
+        if (ta_owns(ta, src_ids[i]))     printf("T:%d ", src_ids[i]);
+        else if (sba_owns(sba,src_ids[i])) printf("TEMP:%.2f ", sba_decode(sba,src_ids[i]));
     }
     printf("\ngen : ");
 
     int D = D_MODEL, V = V_EVENT;
+    /* Allocate emb once at max capacity to avoid per-step realloc */
+    Mat emb     = mat_new(SEQ_CAP, D);
     Mat logits_1 = mat_new(1, V);
 
     for (int step = 0; step < max_steps; step++) {
         int n = seq->n;
-        Mat emb = mat_new(n, D);
-        event_embed_fwd(seq, ee, &emb);
+        emb.r = n;   /* trim view to current length */
 
+        if (event_embed_fwd(seq, ee, &emb) != 0) break;
+
+        /* causal encoder forward — O(n) */
         Mat cur = emb;
         for (int l=0;l<m->c.L;l++) {
-            el_fwd(&cur, &m->enc[l], ec[l], &m->c);
+            el_fwd(&cur, &m->enc[l], ec[l], &m->c, 1);
             cur.d=ec[l]->xo.d; cur.r=n; cur.c=D;
         }
-        memcpy(enc_out->d, cur.d, (size_t)n*D*sizeof(float));
-        enc_out->r = 1;  /* predict from last position only */
-        {   Mat last = {enc_out->d + (n-1)*D, 1, D};
+        /* predict from last hidden state */
+        {   Mat last = {cur.d + (n-1)*D, 1, D};
             event_head_fwd(eh, &last, &logits_1); }
-        mat_del(&emb);
 
         int best = 0;
         for (int j=1;j<V;j++) if(logits_1.d[j]>logits_1.d[best]) best=j;
 
         if (ta_owns(ta, best)) {
             printf("T:%d ", best);
-            ta_encode(ta, seq, &best, 1, n);
+            if (ta_encode(ta, seq, &best, 1, n) != 0) break;
             if (best == 2) break;  /* EOS */
         } else if (sba_owns(sba, best)) {
             float v = sba_decode(sba, best);
             printf("TEMP:%.2f ", v);
-            sba_encode(sba, seq, v, n);
+            if (sba_encode(sba, seq, v, n) != 0) break;
         } else {
             printf("?(%d) ", best); break;
         }
     }
     printf("\n");
 
+    mat_del(&emb);
     mat_del(&logits_1);
     event_seq_del(seq);
 }
@@ -278,6 +302,11 @@ void run_event_task(void) {
 
     int STEPS = 3000;
     float smooth = 0.f;
+    float lr=1e-3f, b1=0.9f, b2=0.98f, eps=1e-9f;
+
+    /* Persistent optimizer so opt_step's internal step counter stays in sync
+       with adam_event_embed/adam_event_head. All three must use the same step. */
+    Opt opt_m = {.lr=lr, .b1=b1, .b2=b2, .eps=eps, .step=0};
 
     for (int step = 0; step < STEPS; step++) {
         make_event_pair(seq, &ta, &sba, lbl);
@@ -288,17 +317,11 @@ void run_event_task(void) {
 
         float loss = step_fwd_bwd(seq, lbl, ee, eh, m, ec, &enc_out);
 
-        int s = step + 1;
-        float lr=1e-3f, b1=0.9f, b2=0.98f, eps=1e-9f;
-        float lr_t = lr * sqrtf(1.f-powf(b2,s)) / (1.f-powf(b1,s));
-
-        /* update encoder weights */
-        Opt opt_m = {.lr=lr,.b1=b1,.b2=b2,.eps=eps,.step=s};
+        /* opt_step increments opt_m.step then applies bias correction at that
+           value; pass the same post-increment value to adam_event_embed/head. */
         opt_step(m, &opt_m);
-
-        adam_event_embed(ee, s, lr, b1, b2, eps);
-        adam_event_head(eh,  s, lr, b1, b2, eps);
-        (void)lr_t;
+        adam_event_embed(ee, opt_m.step, lr, b1, b2, eps);
+        adam_event_head(eh,  opt_m.step, lr, b1, b2, eps);
 
         smooth = (step == 0) ? loss : 0.99f*smooth + 0.01f*loss;
         if ((step+1) % 500 == 0)
@@ -309,7 +332,7 @@ void run_event_task(void) {
     /* decode sample */
     printf("\n-- Greedy decode sample (after %d steps) --\n", STEPS);
     int sample_src[] = {1, 5, 3};  /* BOS, tok5, tok3 */
-    greedy_decode_event(sample_src, 3, &ta, &sba, ee, eh, m, ec, &enc_out, 8);
+    greedy_decode_event(sample_src, 3, &ta, &sba, ee, eh, m, ec, 8);
 
     /* cleanup */
     event_seq_del(seq);

@@ -14,15 +14,15 @@
  *   ff_out = FFN(r1)
  *   xo  = LN2(r1 + ff_out)
  */
-void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg) {
+void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg, int causal) {
     int S = x->r, D = cfg->D;
 
     /* save input */
     memcpy(c->xi.d, x->d, (size_t)S*D*sizeof(float));
 
-    /* self-attention */
+    /* self-attention (causal=0 for encoder, causal=1 for causal LM) */
     Mat xi_s = {c->xi.d, S, D};
-    attn_fwd(&xi_s, &xi_s, &w->sa, cfg->H, 0, &c->sa);
+    attn_fwd(&xi_s, &xi_s, &w->sa, cfg->H, causal, &c->sa);
 
     /* residual + LN1: r1 = xi + sa.ao,  x1 = LN1(r1) */
     {   Mat ao_s = {c->sa.ao.d, S, D};
@@ -51,7 +51,7 @@ void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg) {
  * dw   : accumulated weight gradients
  */
 void el_bwd(const EL *w, EC *c, const Cfg *cfg,
-            const Mat *dy, EL *dw, Mat *dx) {
+            const Mat *dy, EL *dw, Mat *dx, int causal) {
     int S = c->sa.S, D = cfg->D;
 
     /* -- LN2 backward -- */
@@ -90,6 +90,6 @@ void el_bwd(const EL *w, EC *c, const Cfg *cfg,
     mat_del(&dr1);
 
     /* dx (query src) and dkv (same as dx for self-attn) both go to dx */
-    attn_bwd(&w->sa, cfg->H, 0, &c->sa, &d_ao, dx, dx, (AW*)&dw->sa);
+    attn_bwd(&w->sa, cfg->H, causal, &c->sa, &d_ao, dx, dx, (AW*)&dw->sa);
     mat_del(&d_ao);
 }

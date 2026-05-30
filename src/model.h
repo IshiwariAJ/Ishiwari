@@ -132,11 +132,12 @@ void ffn_bwd(const Mat *x, const FW *w, const Mat *h,
              const Mat *dout, Mat *dx, FW *dw);
 
 /* ── Encoder/Decoder layer fwd/bwd ─────────────────── */
-void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg);
+/* causal=0 for bidirectional encoder, causal=1 for causal LM */
+void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg, int causal);
 void dl_fwd(const Mat *x, const Mat *enc, const DL *w, DC *c, const Cfg *cfg);
 /* dx/d_enc accumulated */
 void el_bwd(const EL *w, EC *c, const Cfg *cfg,
-            const Mat *dy, EL *dw, Mat *dx);
+            const Mat *dy, EL *dw, Mat *dx, int causal);
 void dl_bwd(const DL *w, DC *c, const Cfg *cfg,
             const Mat *dy, DL *dw, Mat *dx, Mat *d_enc);
 
@@ -170,7 +171,8 @@ void         decode_cache_reset(DecodeCache *c);
 
 void model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out);
 void decode_cache_precompute_cross(DecodeCache *c, Model *m, const Mat *enc_out);
-void model_decode_step(Model *m, int token, int pos,
+/* Returns 0 on success, -1 on invalid args or cache overflow. */
+int  model_decode_step(Model *m, int token, int pos,
                        DecodeCache *kv, Mat *logits_1xV);
 
 #endif

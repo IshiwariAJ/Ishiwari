@@ -69,4 +69,21 @@ int ta_encode(const TextAdapter *a, EventSeq *s,
  */
 int ta_owns(const TextAdapter *a, int token_id);
 
+/* ── Output adapter: EventHead logits -> EventSeq ────── */
+/*
+ * Restore an EventSeq from EventHead logits (n x V).
+ * For each position, picks argmax and uses TextAdapter / ScalarBinAdapters
+ * to interpret the token and append the corresponding event to out_seq.
+ *
+ * sba_list: array of n_sba ScalarBinAdapters, tried in order.
+ * eos_token_id: stop appending after this token is emitted.
+ *
+ * Returns number of events appended.
+ */
+int event_head_to_seq(const Mat *logits,
+                      const TextAdapter *ta,
+                      const ScalarBinAdapter *sba_list, int n_sba,
+                      EventSeq *out_seq,
+                      int eos_token_id);
+
 #endif

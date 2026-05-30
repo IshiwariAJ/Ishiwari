@@ -1,5 +1,6 @@
 #include "model.h"
 #include "event.h"
+#include "adapters.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -310,7 +311,7 @@ static void test_encoder_shape(void) {
     for(int i=0;i<cfg.D*cfg.F;i++) w.ff.W1.w[i]=0.01f*(i%5-2);
     for(int i=0;i<cfg.F*cfg.D;i++) w.ff.W2.w[i]=0.01f*(i%5-2);
     for(int i=0;i<cfg.D;i++) w.ln1.scale.w[i]=w.ln2.scale.w[i]=1.f;
-    el_fwd(&x, &w, c, &cfg);
+    el_fwd(&x, &w, c, &cfg, 0);
     /* xo pre-allocated to T rows; actual length tracked in self-attn cache */
     check("ec sa.S == S",  c->sa.S == S);
     check("ec xo.c == D",  c->xo.c == cfg.D);
@@ -395,6 +396,128 @@ static void test_attn_bwd_finite_diff(void) {
     mat_del(&dao); mat_del(&dx); mat_del(&dkv);
 }
 
+/* ── Causal: no future peeking ───────────────────────── */
+/*
+ * Verify that with causal=1, changing position 2 does NOT affect
+ * the hidden state at position 0. With causal=0 it does (information leak).
+ */
+static void test_causal_no_future_peek(void) {
+    printf("[el_fwd causal=1: no future peeking]\n");
+    Cfg cfg = {.V=11,.T=8,.D=16,.H=4,.F=32,.L=1,.eps=1e-5f};
+    EL w = el_new(cfg.D, cfg.F);
+    EC *c1 = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    EC *c2 = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    int S = 3;
+
+    /* init non-trivial weights */
+    for(int i=0;i<cfg.D*cfg.D;i++){
+        w.sa.Wq.w[i]=0.05f*(i%7-3); w.sa.Wk.w[i]=0.05f*(i%11-5);
+        w.sa.Wv.w[i]=0.05f*(i%5-2); w.sa.Wo.w[i]=0.05f*(i%3-1);}
+    for(int i=0;i<cfg.D*cfg.F;i++) w.ff.W1.w[i]=0.02f*(i%5-2);
+    for(int i=0;i<cfg.F*cfg.D;i++) w.ff.W2.w[i]=0.02f*(i%5-2);
+    for(int i=0;i<cfg.D;i++) w.ln1.scale.w[i]=w.ln2.scale.w[i]=1.f;
+
+    /* sequence x: positions 0,1,2 */
+    Mat x1 = mat_new(S, cfg.D);
+    Mat x2 = mat_new(S, cfg.D);
+    for(int i=0;i<S*cfg.D;i++) x1.d[i]=x2.d[i]=0.01f*(i%9-4);
+    /* change ONLY position 2 in x2 */
+    for(int d=0;d<cfg.D;d++) x2.d[2*cfg.D+d] += 1.0f;
+
+    el_fwd(&x1, &w, c1, &cfg, 1);  /* causal */
+    el_fwd(&x2, &w, c2, &cfg, 1);
+
+    /* position 0 output must be IDENTICAL (causal=1 means pos 0 can't see pos 2) */
+    float diff0 = 0.f;
+    for(int d=0;d<cfg.D;d++) diff0 += fabsf(c1->xo.d[d] - c2->xo.d[d]);
+    check("pos0 unchanged after pos2 change (causal=1)", diff0 < 1e-5f);
+
+    /* position 2 output MUST differ (it received the change) */
+    float diff2 = 0.f;
+    for(int d=0;d<cfg.D;d++) diff2 += fabsf(c1->xo.d[2*cfg.D+d] - c2->xo.d[2*cfg.D+d]);
+    check("pos2 changes after pos2 input change", diff2 > 1e-4f);
+
+    /* sanity: with causal=0, pos0 WOULD change (information flows from pos2) */
+    EC *c3 = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    EC *c4 = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    el_fwd(&x1, &w, c3, &cfg, 0);
+    el_fwd(&x2, &w, c4, &cfg, 0);
+    float diff0_nc = 0.f;
+    for(int d=0;d<cfg.D;d++) diff0_nc += fabsf(c3->xo.d[d] - c4->xo.d[d]);
+    check("pos0 changes with causal=0 (confirms non-causal leaks)", diff0_nc > 1e-5f);
+
+    el_del(&w); ec_del(c1); ec_del(c2); ec_del(c3); ec_del(c4);
+    mat_del(&x1); mat_del(&x2);
+}
+
+static void test_event_head_to_seq(void) {
+    printf("[event_head_to_seq]\n");
+    int V=11+8;  /* TEXT_VOCAB=11, TEMP_BINS=8 */
+    TextAdapter ta = {.vocab_size = 11};
+    ScalarBinAdapter sba = {.modality=MOD_TEMPERATURE,.channel=0,.n_bins=8,.vocab_offset=11};
+
+    /* logits: 3 positions, argmax = [1 (BOS), 13 (TEMP bin 2), 2 (EOS)] */
+    Mat logits = mat_new(3, V);
+    logits.d[0*V + 1]  = 5.f;   /* pos0: text BOS */
+    logits.d[1*V + 13] = 5.f;   /* pos1: temp bin 2 (11+2) */
+    logits.d[2*V + 2]  = 5.f;   /* pos2: text EOS */
+
+    EventSeq *out = event_seq_new(8);
+    int n = event_head_to_seq(&logits, &ta, &sba, 1, out, 2 /*EOS*/);
+
+    check("decoded 3 events", n == 3);
+    check("pos0 is TEXT", out->modality[0] == MOD_TEXT);
+    check("pos0 token_id == 1", out->token_id[0] == 1);
+    check("pos1 is TEMPERATURE", out->modality[1] == MOD_TEMPERATURE);
+    check("pos1 value == 2/7", fclose_to(out->value[1], 2.f/7.f, 1e-4f));
+    check("pos2 is TEXT EOS", out->token_id[2] == 2);
+
+    mat_del(&logits);
+    event_seq_del(out);
+}
+
+static void test_event_embed_validation(void) {
+    printf("[event_embed_fwd validation]\n");
+    int D=8, V=11, T=8;
+    EventEmbed *e = event_embed_new(D, V, T);
+    event_embed_init(e);
+    Mat out = mat_new(1, D);
+
+    /* valid event */
+    EventSeq *s = event_seq_new(4);
+    int tok = 3;
+    event_append_text(s, &tok, 1, 0);
+    check("valid event returns 0", event_embed_fwd(s, e, &out) == 0);
+
+    /* invalid modality */
+    s->modality[0] = EVENT_MAX_MOD + 1;
+    check("bad modality returns -1", event_embed_fwd(s, e, &out) == -1);
+    s->modality[0] = MOD_TEXT;
+
+    /* invalid time_index */
+    s->time_index[0] = T + 5;
+    check("bad time_index returns -1", event_embed_fwd(s, e, &out) == -1);
+    s->time_index[0] = 0;
+
+    /* invalid token_id */
+    s->token_id[0] = V + 1;
+    check("bad token_id returns -1", event_embed_fwd(s, e, &out) == -1);
+
+    mat_del(&out);
+    event_seq_del(s);
+    event_embed_del(e);
+}
+
+static void test_sba_guard(void) {
+    printf("[ScalarBinAdapter n_bins guard]\n");
+    ScalarBinAdapter bad = {.modality=MOD_TEMPERATURE,.channel=0,.n_bins=1,.vocab_offset=0};
+    EventSeq *s = event_seq_new(4);
+    check("sba_encode n_bins=1 returns -1", sba_encode(&bad, s, 0.5f, 0) == -1);
+    check("sba_decode n_bins=1 returns -1", fclose_to(sba_decode(&bad, 0), -1.f, 1e-5f));
+    check("sba_label  n_bins=1 returns offset", sba_label(&bad, 0.5f) == bad.vocab_offset);
+    event_seq_del(s);
+}
+
 /* ── main ────────────────────────────────────────────── */
 
 int main(void) {
@@ -413,6 +536,10 @@ int main(void) {
     test_encoder_shape();
     test_decoder_shape();
     test_attn_bwd_finite_diff();
+    test_causal_no_future_peek();
+    test_event_head_to_seq();
+    test_event_embed_validation();
+    test_sba_guard();
     printf("\n%d passed, %d failed\n", n_pass, n_fail);
     return n_fail > 0 ? 1 : 0;
 }

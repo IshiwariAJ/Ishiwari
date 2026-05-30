@@ -142,7 +142,7 @@ int main(void) {
     int gen2[MAX_SEQ]; gen2[0] = BOS;
     int gl2 = 1;
     for (int step = 0; step < MAX_SEQ-1; step++) {
-        model_decode_step(m, gen2[gl2-1], gl2-1, dkv, &logits1);
+        if (model_decode_step(m, gen2[gl2-1], gl2-1, dkv, &logits1) != 0) break;
         int best = 0;
         for (int j = 1; j < cfg.V; j++) if (logits1.d[j]>logits1.d[best]) best=j;
         gen2[gl2++] = best;
@@ -193,7 +193,7 @@ int main(void) {
         decode_cache_reset(bench_kv);
         int g[MAX_SEQ]; g[0] = BOS; int gl_k = 1;
         for (int step = 0; step < MAX_SEQ-1; step++) {
-            model_decode_step(m, g[gl_k-1], gl_k-1, bench_kv, &logits_b);
+            if (model_decode_step(m, g[gl_k-1], gl_k-1, bench_kv, &logits_b) != 0) break;
             int best = 0;
             for (int j = 1; j < cfg.V; j++) if (logits_b.d[j]>logits_b.d[best]) best=j;
             g[gl_k++] = best;

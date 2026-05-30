@@ -51,7 +51,7 @@ void model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out) {
     }
     Mat cur = enc_in;
     for (int l = 0; l < m->c.L; l++) {
-        el_fwd(&cur, &m->enc[l], ec[l], &m->c);
+        el_fwd(&cur, &m->enc[l], ec[l], &m->c, 0);
         cur.d = ec[l]->xo.d;
         cur.r = SL; cur.c = D;
     }
@@ -127,8 +127,26 @@ static void attn_1q(const float *q, const float *K, const float *V,
  *   h = LN2(h + ca_proj)
  *   h = LN3(h + FFN(h))
  */
-void model_decode_step(Model *m, int token, int pos,
-                       DecodeCache *kv, Mat *logits_1xV) {
+int model_decode_step(Model *m, int token, int pos,
+                      DecodeCache *kv, Mat *logits_1xV) {
+    if (pos < 0 || pos >= m->c.T) {
+        fprintf(stderr, "model_decode_step: pos=%d out of range [0,%d)\n", pos, m->c.T);
+        return -1;
+    }
+    if (token < 0 || token >= m->c.V) {
+        fprintf(stderr, "model_decode_step: token=%d out of range [0,%d)\n", token, m->c.V);
+        return -1;
+    }
+    for (int l = 0; l < kv->L; l++) {
+        if (kv->layers[l].self.len >= kv->max_len) {
+            fprintf(stderr, "model_decode_step: self KV cache full at layer %d\n", l);
+            return -1;
+        }
+        if (kv->layers[l].cross.len <= 0) {
+            fprintf(stderr, "model_decode_step: cross KV not precomputed at layer %d\n", l);
+            return -1;
+        }
+    }
     int D = m->c.D, V = m->c.V, H = m->c.H, F = m->c.F;
 
     float *h   = (float*)calloc(D, sizeof(float));
@@ -201,4 +219,5 @@ void model_decode_step(Model *m, int token, int pos,
         add_bias(logits_1xV,m->proj_b.w); }
 
     free(h); free(tmp); free(q); free(ao); free(ffh);
+    return 0;
 }

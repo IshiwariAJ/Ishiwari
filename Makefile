@@ -31,9 +31,6 @@ test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
 clean:
-	del /Q $(TARGET).exe 2>NUL || true
-	del /Q $(TARGET) 2>NUL || true
-	del /Q $(TEST_TARGET).exe 2>NUL || true
-	del /Q $(TEST_TARGET) 2>NUL || true
+	rm -f $(TARGET) $(TARGET).exe $(TEST_TARGET) $(TEST_TARGET).exe
 
 .PHONY: all test clean

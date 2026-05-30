@@ -35,7 +35,7 @@ void model_fwd(Model *m,
     /* pass through encoder layers */
     Mat enc_cur = enc_in;
     for (int l = 0; l < m->c.L; l++) {
-        el_fwd(&enc_cur, &m->enc[l], ec[l], &m->c);
+        el_fwd(&enc_cur, &m->enc[l], ec[l], &m->c, 0);
         enc_cur.d = ec[l]->xo.d;  /* point to layer output */
         enc_cur.r = SL; enc_cur.c = D;
     }
@@ -140,7 +140,7 @@ float model_loss_bwd(Model *m,
     for (int l = L-1; l >= 0; l--) {
         Mat d_enc_prev = mat_new(SL, D);
         el_bwd(&m->enc[l], ec[l], &m->c,
-               &d_enc_cur, &m->enc[l], &d_enc_prev);
+               &d_enc_cur, &m->enc[l], &d_enc_prev, 0);
         if (l < L-1) mat_del(&d_enc_cur);
         d_enc_cur = d_enc_prev;
     }

@@ -87,8 +87,9 @@ EventEmbed *event_embed_new(int D, int V, int max_time);
 void        event_embed_del(EventEmbed *e);
 void        event_embed_init(EventEmbed *e);
 
-/* Convert EventSeq to (s->n x D) embedding matrix. out must be pre-allocated. */
-void event_embed_fwd(const EventSeq *s, const EventEmbed *e, Mat *out);
+/* Convert EventSeq to (s->n x D) embedding matrix. out must be pre-allocated.
+ * Returns 0 on success, -1 if any event field is out of range. */
+int event_embed_fwd(const EventSeq *s, const EventEmbed *e, Mat *out);
 
 /*
  * Backward: given dout (s->n x D), accumulate gradients into de.
