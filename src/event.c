@@ -259,3 +259,78 @@ void event_head_bwd(const EventHead *h, const Mat *hidden,
     bias_bwd(d_logits, dh->proj_b.g);
 }
 
+/* ── EventEmbed / EventHead serialization ────────────── */
+
+static int ev_wr(const void *p, size_t sz, size_t n, FILE *f) { return fwrite(p,sz,n,f)==n; }
+static int ev_rd(void *p, size_t sz, size_t n, FILE *f)       { return fread(p,sz,n,f)==n; }
+
+int event_embed_save(const EventEmbed *e, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ok = 1, ver = 1;
+    ok &= ev_wr("EVEM",1,4,f);
+    ok &= ev_wr(&ver,sizeof(int),1,f);
+    ok &= ev_wr(&e->D,sizeof(int),1,f);
+    ok &= ev_wr(&e->V,sizeof(int),1,f);
+    ok &= ev_wr(&e->max_time,sizeof(int),1,f);
+    ok &= ev_wr(e->mod_emb.w, sizeof(float), e->mod_emb.n, f);
+    ok &= ev_wr(e->chan_emb.w,sizeof(float), e->chan_emb.n,f);
+    ok &= ev_wr(e->tok_emb.w, sizeof(float), e->tok_emb.n, f);
+    ok &= ev_wr(e->val_w.w,   sizeof(float), e->val_w.n,   f);
+    ok &= ev_wr(e->val_b.w,   sizeof(float), e->val_b.n,   f);
+    fclose(f);
+    return ok ? 0 : -1;
+}
+
+EventEmbed *event_embed_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char magic[4]; int ver, D, V, T;
+    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVEM",4)!=0) { fclose(f); return NULL; }
+    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
+    if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) ||
+        !ev_rd(&T,sizeof(int),1,f) || D<=0 || V<=0 || T<=0) { fclose(f); return NULL; }
+    EventEmbed *e = event_embed_new(D, V, T);
+    int ok = 1;
+    ok &= ev_rd(e->mod_emb.w, sizeof(float), e->mod_emb.n, f);
+    ok &= ev_rd(e->chan_emb.w,sizeof(float), e->chan_emb.n,f);
+    ok &= ev_rd(e->tok_emb.w, sizeof(float), e->tok_emb.n, f);
+    ok &= ev_rd(e->val_w.w,   sizeof(float), e->val_w.n,   f);
+    ok &= ev_rd(e->val_b.w,   sizeof(float), e->val_b.n,   f);
+    fclose(f);
+    if (!ok) { event_embed_del(e); return NULL; }
+    return e;
+}
+
+int event_head_save(const EventHead *h, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ok = 1, ver = 1;
+    ok &= ev_wr("EVHD",1,4,f);
+    ok &= ev_wr(&ver,sizeof(int),1,f);
+    ok &= ev_wr(&h->D,sizeof(int),1,f);
+    ok &= ev_wr(&h->V,sizeof(int),1,f);
+    ok &= ev_wr(h->proj.w,  sizeof(float), h->proj.n,  f);
+    ok &= ev_wr(h->proj_b.w,sizeof(float), h->proj_b.n,f);
+    fclose(f);
+    return ok ? 0 : -1;
+}
+
+EventHead *event_head_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char magic[4]; int ver, D, V;
+    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVHD",4)!=0) { fclose(f); return NULL; }
+    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
+    if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) || D<=0 || V<=0) {
+        fclose(f); return NULL;
+    }
+    EventHead *h = event_head_new(D, V);
+    int ok = 1;
+    ok &= ev_rd(h->proj.w,  sizeof(float), h->proj.n,  f);
+    ok &= ev_rd(h->proj_b.w,sizeof(float), h->proj_b.n,f);
+    fclose(f);
+    if (!ok) { event_head_del(h); return NULL; }
+    return h;
+}
+

@@ -78,7 +78,8 @@ int ta_owns(const TextAdapter *a, int token_id);
  * sba_list: array of n_sba ScalarBinAdapters, tried in order.
  * eos_token_id: stop appending after this token is emitted.
  *
- * Returns number of events appended.
+ * Returns the number of events appended (>= 0), or -1 if an append failed
+ * (e.g. out_seq capacity exceeded).
  */
 int event_head_to_seq(const Mat *logits,
                       const TextAdapter *ta,

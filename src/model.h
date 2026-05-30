@@ -175,4 +175,12 @@ void decode_cache_precompute_cross(DecodeCache *c, Model *m, const Mat *enc_out)
 int  model_decode_step(Model *m, int token, int pos,
                        DecodeCache *kv, Mat *logits_1xV);
 
+/* ── Serialization ──────────────────────────────────── */
+/* Save/load all learnable weights. Format carries a version + Cfg header,
+ * so model_load reconstructs the model with matching shapes.
+ * model_save: 0 on success, -1 on failure.
+ * model_load: returns a new Model (caller frees with model_del), NULL on failure. */
+int    model_save(const Model *m, const char *path);
+Model *model_load(const char *path);
+
 #endif

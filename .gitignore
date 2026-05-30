@@ -9,6 +9,10 @@
 # Local/generated files
 NUL
 Note/
+err.txt
+out.txt
+rule.txt
+*.bin
 
 # Editor/local tool state
 .claude/settings.local.json

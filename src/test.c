@@ -518,7 +518,85 @@ static void test_sba_guard(void) {
     event_seq_del(s);
 }
 
-/* ── main ────────────────────────────────────────────── */
+/* ---- serialization round-trip tests ---- */
+static void test_model_serialize(void) {
+    printf("[model_save/load round-trip]\n");
+    Cfg cfg = {.V=11,.T=8,.D=16,.H=4,.F=32,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    const char *path = "test_model.bin";
+    check("model_save ok", model_save(m, path) == 0);
+    Model *m2 = model_load(path);
+    check("model_load non-null", m2 != NULL);
+    if (m2) {
+        check("cfg.V preserved", m2->c.V == cfg.V);
+        check("cfg.D preserved", m2->c.D == cfg.D);
+        check("cfg.L preserved", m2->c.L == cfg.L);
+        int same = 1;
+        for (int i=0;i<cfg.V*cfg.D;i++) if (m->se.w[i]!=m2->se.w[i]) {same=0;break;}
+        check("se weights match", same);
+        same = 1;
+        for (int i=0;i<cfg.D*cfg.V;i++) if (m->proj.w[i]!=m2->proj.w[i]) {same=0;break;}
+        check("proj weights match", same);
+        same = 1;
+        for (int i=0;i<cfg.D*cfg.D;i++)
+            if (m->enc[0].sa.Wq.w[i]!=m2->enc[0].sa.Wq.w[i]) {same=0;break;}
+        check("enc[0].sa.Wq match", same);
+        same = 1;
+        for (int i=0;i<cfg.D*cfg.D;i++)
+            if (m->dec[1].ca.Wv.w[i]!=m2->dec[1].ca.Wv.w[i]) {same=0;break;}
+        check("dec[1].ca.Wv match", same);
+        model_del(m2);
+    }
+    remove(path);
+    model_del(m);
+}
+
+static void test_event_serialize(void) {
+    printf("[event_embed/head save/load round-trip]\n");
+    srand(7);
+    EventEmbed *e = event_embed_new(16, 11, 8);
+    event_embed_init(e);
+    const char *ep = "test_ee.bin";
+    check("event_embed_save ok", event_embed_save(e, ep) == 0);
+    EventEmbed *e2 = event_embed_load(ep);
+    check("event_embed_load non-null", e2 != NULL);
+    if (e2) {
+        int same = 1;
+        for (int i=0;i<e->tok_emb.n;i++) if (e->tok_emb.w[i]!=e2->tok_emb.w[i]) {same=0;break;}
+        check("tok_emb match", same);
+        same = 1;
+        for (int i=0;i<e->val_w.n;i++) if (e->val_w.w[i]!=e2->val_w.w[i]) {same=0;break;}
+        check("val_w match", same);
+        event_embed_del(e2);
+    }
+    remove(ep);
+    event_embed_del(e);
+
+    EventHead *h = event_head_new(16, 19);
+    event_head_init(h);
+    const char *hp = "test_eh.bin";
+    check("event_head_save ok", event_head_save(h, hp) == 0);
+    EventHead *h2 = event_head_load(hp);
+    check("event_head_load non-null", h2 != NULL);
+    if (h2) {
+        int same = 1;
+        for (int i=0;i<h->proj.n;i++) if (h->proj.w[i]!=h2->proj.w[i]) {same=0;break;}
+        check("head proj match", same);
+        event_head_del(h2);
+    }
+    remove(hp);
+    event_head_del(h);
+}
+
+static void test_load_bad_magic(void) {
+    printf("[model_load rejects bad file]\n");
+    const char *path = "test_bad.bin";
+    FILE *f = fopen(path, "wb");
+    if (f) { fputs("XXXXgarbage", f); fclose(f); }
+    check("model_load returns NULL on bad magic", model_load(path) == NULL);
+    remove(path);
+}
 
 int main(void) {
     srand(0);
@@ -540,6 +618,9 @@ int main(void) {
     test_event_head_to_seq();
     test_event_embed_validation();
     test_sba_guard();
+    test_model_serialize();
+    test_event_serialize();
+    test_load_bad_magic();
     printf("\n%d passed, %d failed\n", n_pass, n_fail);
     return n_fail > 0 ? 1 : 0;
 }

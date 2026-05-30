@@ -79,20 +79,21 @@ int event_head_to_seq(const Mat *logits,
         for (int j = 1; j < V; j++) if (row[j] > row[best]) best = j;
 
         if (ta_owns(ta, best)) {
-            ta_encode(ta, out_seq, &best, 1, t);
+            if (ta_encode(ta, out_seq, &best, 1, t) != 0) return -1;
         } else {
             int matched = 0;
             for (int k = 0; k < n_sba; k++) {
                 if (sba_owns(&sba_list[k], best)) {
                     float v = sba_decode(&sba_list[k], best);
-                    event_append_scalar(out_seq, &v, 1,
-                                        sba_list[k].modality,
-                                        sba_list[k].channel, t);
+                    if (event_append_scalar(out_seq, &v, 1,
+                                            sba_list[k].modality,
+                                            sba_list[k].channel, t) != 0)
+                        return -1;
                     matched = 1;
                     break;
                 }
             }
-            if (!matched) break;
+            if (!matched) break;  /* unknown token: stop cleanly */
         }
         appended++;
         if (best == eos_token_id) break;
