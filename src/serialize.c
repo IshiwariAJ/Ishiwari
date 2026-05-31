@@ -81,12 +81,9 @@ static int load_dl(FILE *f, DL *d) {
         && load_ln(f,&d->ln1)&&load_ln(f,&d->ln2)&&load_ln(f,&d->ln3);
 }
 
-/* --- public API--- */
+/* --- internal save/load to FILE* --- */
 
-int model_save(const Model *m, const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-
+static int model_save_to_fp(const Model *m, FILE *f) {
     int ok = 1;
     int ver = MODEL_VERSION;
     const Cfg *c = &m->c;
@@ -107,53 +104,39 @@ int model_save(const Model *m, const char *path) {
     ok &= save_p(f, &m->proj);
     ok &= save_p(f, &m->proj_b);
 
-    fclose(f);
     return ok ? 0 : -1;
 }
 
-Model *model_load(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-
+static Model *model_load_from_fp(FILE *f) {
     char magic[4];
     int ver;
     Cfg c;
-    if (!rd(magic, 1, 4, f) || memcmp(magic, MODEL_MAGIC, 4) != 0) { fclose(f); return NULL; }
-    if (!rd(&ver, sizeof(int), 1, f) || ver != MODEL_VERSION)      { fclose(f); return NULL; }
+    if (!rd(magic, 1, 4, f) || memcmp(magic, MODEL_MAGIC, 4) != 0) return NULL;
+    if (!rd(&ver, sizeof(int), 1, f) || ver != MODEL_VERSION) return NULL;
     if (!rd(&c.V, sizeof(int), 1, f) || !rd(&c.T, sizeof(int), 1, f) ||
         !rd(&c.D, sizeof(int), 1, f) || !rd(&c.H, sizeof(int), 1, f) ||
         !rd(&c.F, sizeof(int), 1, f) || !rd(&c.L, sizeof(int), 1, f) ||
-        !rd(&c.eps, sizeof(float), 1, f)) { fclose(f); return NULL; }
+        !rd(&c.eps, sizeof(float), 1, f)) return NULL;
 
     /* basic sanity on shapes */
     if (c.V<=0 || c.T<=0 || c.D<=0 || c.H<=0 || c.F<=0 || c.L<=0 || c.D % c.H != 0) {
-        fclose(f); return NULL;
+        return NULL;
     }
-    /* upper bounds to prevent huge allocations */
+    /* upper bounds */
     if (c.V>MAX_V || c.T>MAX_T || c.D>MAX_D || c.H>MAX_H || c.F>MAX_F || c.L>MAX_L) {
-        fclose(f); return NULL;
+        return NULL;
     }
-    /* total parameter count check:
-     * embeddings: 2 * V * D (src + tgt)
-     * per encoder layer: 4*D*D (sa) + 4*D (sa bias) + D*F + F + F*D + D (ffn) + 4*D (ln)
-     *                  ~ 4*D*D + 2*D*F + 8*D
-     * per decoder layer: 8*D*D (sa + ca) + 8*D (biases) + 2*D*F + 2*D (ffn) + 6*D (ln)
-     *                  ~ 8*D*D + 2*D*F + 16*D
-     * output projection: D*V + V
-     * simplified: params ~ 2*V*D + L*(12*D*D + 4*D*F) + D*V
-     */
+    /* total parameter count check */
     {
         int64_t D = c.D, F = c.F, V = c.V, L = c.L;
         int64_t emb_params = 2 * V * D;
         int64_t layer_params = L * (12 * D * D + 4 * D * F + 24 * D);
         int64_t proj_params = D * V + V;
         int64_t total = emb_params + layer_params + proj_params;
-        if (total > MAX_PARAMS) {
-            fclose(f); return NULL;
-        }
+        if (total > MAX_PARAMS) return NULL;
     }
 
-    Model *m = model_new(&c);   /* allocates correct shapes, regenerates pos */
+    Model *m = model_new(&c);
 
     int ok = 1;
     ok &= load_p(f, &m->se);
@@ -163,7 +146,34 @@ Model *model_load(const char *path) {
     ok &= load_p(f, &m->proj);
     ok &= load_p(f, &m->proj_b);
 
-    fclose(f);
     if (!ok) { model_del(m); return NULL; }
     return m;
+}
+
+/* --- public API--- */
+
+int model_save(const Model *m, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int result = model_save_to_fp(m, f);
+    fclose(f);
+    return result;
+}
+
+Model *model_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    Model *m = model_load_from_fp(f);
+    fclose(f);
+    return m;
+}
+
+/* --- FILE* API for bundle direct serialization --- */
+
+int model_save_fp(const Model *m, FILE *f) {
+    return model_save_to_fp(m, f);
+}
+
+Model *model_load_fp(FILE *f) {
+    return model_load_from_fp(f);
 }

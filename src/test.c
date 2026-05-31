@@ -3,6 +3,7 @@
 #include "adapters.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <math.h>
 #include <string.h>
 
@@ -742,6 +743,518 @@ static void test_decode_cache_precompute_validation(void) {
     model_del(m);
 }
 
+static void test_adapter_schema(void) {
+    printf("[adapter_schema save/load round-trip]\n");
+    const char *path = "test_schema.bin";
+
+    AdapterSchema *s = adapter_schema_new();
+
+    /* add text adapter: vocab_size=100 */
+    int idx_text = adapter_schema_add_text(s, 100);
+    check("add_text returns index 0", idx_text == 0);
+    check("total_vocab after text == 100", s->total_vocab == 100);
+
+    /* add scalar adapter: TEMPERATURE, 8 bins */
+    int idx_temp = adapter_schema_add_scalar(s, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);
+    check("add_scalar returns index 1", idx_temp == 1);
+    check("total_vocab after temp == 108", s->total_vocab == 108);
+
+    /* add another scalar adapter: TIME, 16 bins */
+    int idx_time = adapter_schema_add_scalar(s, MOD_TIME, 0, 16, 0.f, 1.f);
+    check("add_scalar returns index 2", idx_time == 2);
+    check("total_vocab after time == 124", s->total_vocab == 124);
+
+    /* save */
+    check("adapter_schema_save ok", adapter_schema_save(s, path) == 0);
+
+    /* load */
+    AdapterSchema *s2 = adapter_schema_load(path);
+    check("adapter_schema_load non-null", s2 != NULL);
+    check("n preserved", s2->n == 3);
+    check("total_vocab preserved", s2->total_vocab == 124);
+
+    /* verify entries */
+    check("entry[0] type == TEXT", s2->entries[0].type == ADAPTER_TEXT);
+    check("entry[0] vocab_count == 100", s2->entries[0].vocab_count == 100);
+    check("entry[1] type == SCALAR_BIN", s2->entries[1].type == ADAPTER_SCALAR_BIN);
+    check("entry[1] modality == TEMPERATURE", s2->entries[1].modality == MOD_TEMPERATURE);
+    check("entry[1] vocab_count == 8", s2->entries[1].vocab_count == 8);
+    check("entry[1] vocab_offset == 100", s2->entries[1].vocab_offset == 100);
+    check("entry[2] vocab_offset == 108", s2->entries[2].vocab_offset == 108);
+    check("entry[2] val_max == 1.0", fclose_to(s2->entries[2].val_max, 1.f, 1e-6f));
+
+    /* verify get_text / get_scalar */
+    TextAdapter ta = adapter_schema_get_text(s2, 0);
+    check("get_text vocab_size == 100", ta.vocab_size == 100);
+
+    ScalarBinAdapter sba = adapter_schema_get_scalar(s2, 1);
+    check("get_scalar n_bins == 8", sba.n_bins == 8);
+    check("get_scalar vocab_offset == 100", sba.vocab_offset == 100);
+
+    adapter_schema_del(s);
+    adapter_schema_del(s2);
+    remove(path);
+}
+
+static void test_adapter_schema_validation(void) {
+    printf("[adapter_schema validation]\n");
+
+    AdapterSchema *s = adapter_schema_new();
+
+    /* invalid inputs */
+    check("add_text vocab_size=0 returns -1", adapter_schema_add_text(s, 0) == -1);
+    check("add_scalar n_bins=1 returns -1", adapter_schema_add_scalar(s, MOD_TEMPERATURE, 0, 1, 0.f, 1.f) == -1);
+
+    /* scalar: modality out of range */
+    check("add_scalar modality<0 returns -1", adapter_schema_add_scalar(s, -1, 0, 8, 0.f, 1.f) == -1);
+    check("add_scalar modality>=MAX returns -1", adapter_schema_add_scalar(s, EVENT_MAX_MOD, 0, 8, 0.f, 1.f) == -1);
+
+    /* scalar: channel out of range */
+    check("add_scalar channel<0 returns -1", adapter_schema_add_scalar(s, MOD_TEMPERATURE, -1, 8, 0.f, 1.f) == -1);
+    check("add_scalar channel>=MAX returns -1", adapter_schema_add_scalar(s, MOD_TEMPERATURE, EVENT_MAX_CHAN, 8, 0.f, 1.f) == -1);
+
+    /* scalar: val_min >= val_max */
+    check("add_scalar val_min>=val_max returns -1", adapter_schema_add_scalar(s, MOD_TEMPERATURE, 0, 8, 1.f, 1.f) == -1);
+    check("add_scalar val_min>val_max returns -1", adapter_schema_add_scalar(s, MOD_TEMPERATURE, 0, 8, 2.f, 1.f) == -1);
+
+    adapter_schema_del(s);
+
+    /* text adapter must be first */
+    s = adapter_schema_new();
+    adapter_schema_add_scalar(s, MOD_TEMPERATURE, 0, 8, 0.f, 1.f);  /* scalar first */
+    check("add_text after scalar returns -1", adapter_schema_add_text(s, 100) == -1);
+    adapter_schema_del(s);
+
+    /* only one text adapter allowed */
+    s = adapter_schema_new();
+    adapter_schema_add_text(s, 100);
+    check("add_text twice returns -1", adapter_schema_add_text(s, 50) == -1);
+    adapter_schema_del(s);
+
+    /* load bad file */
+    const char *path = "test_bad_schema.bin";
+    FILE *f = fopen(path, "wb");
+    fwrite("XXXX", 1, 4, f);  /* bad magic */
+    fclose(f);
+    check("load bad magic returns NULL", adapter_schema_load(path) == NULL);
+    remove(path);
+}
+
+static void write_malformed_schema(const char *path, int n, int total_vocab,
+                                   int type0, int mod0, int chan0, int off0, int cnt0,
+                                   float vmin0, float vmax0) {
+    FILE *f = fopen(path, "wb");
+    int ver = 1;
+    fwrite("ADSC", 1, 4, f);
+    fwrite(&ver, sizeof(int), 1, f);
+    fwrite(&n, sizeof(int), 1, f);
+    fwrite(&total_vocab, sizeof(int), 1, f);
+    if (n > 0) {
+        fwrite(&type0, sizeof(int), 1, f);
+        fwrite(&mod0, sizeof(int), 1, f);
+        fwrite(&chan0, sizeof(int), 1, f);
+        fwrite(&off0, sizeof(int), 1, f);
+        fwrite(&cnt0, sizeof(int), 1, f);
+        fwrite(&vmin0, sizeof(float), 1, f);
+        fwrite(&vmax0, sizeof(float), 1, f);
+    }
+    fclose(f);
+}
+
+static void test_model_bundle(void) {
+    printf("[model_bundle save/load round-trip]\n");
+    const char *path = "test_bundle.bin";
+
+    /* create components */
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+
+    EventEmbed *ee = event_embed_new(cfg.D, 124, cfg.T);  /* V=124 for schema */
+    event_embed_init(ee);
+
+    EventHead *eh = event_head_new(cfg.D, 124);
+    event_head_init(eh);
+
+    AdapterSchema *sc = adapter_schema_new();
+    adapter_schema_add_text(sc, 100);                     /* text: 0-99 */
+    adapter_schema_add_scalar(sc, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);  /* temp: 100-107 */
+    adapter_schema_add_scalar(sc, MOD_TIME, 0, 16, 0.f, 1.f);          /* time: 108-123 */
+
+    /* create bundle (transfers ownership) */
+    ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+    check("bundle_new non-null", b != NULL);
+
+    /* save */
+    check("model_bundle_save ok", model_bundle_save(b, path) == 0);
+
+    /* remember some values for comparison */
+    float se_w0 = b->model->se.w[0];
+    float proj_w0 = b->model->proj.w[0];
+    float ee_tok0 = b->embed->tok_emb.w[0];
+    float eh_proj0 = b->head->proj.w[0];
+    int schema_n = b->schema->n;
+    int schema_total = b->schema->total_vocab;
+
+    /* delete original */
+    model_bundle_del(b);
+
+    /* load */
+    ModelBundle *b2 = model_bundle_load(path);
+    check("model_bundle_load non-null", b2 != NULL);
+
+    /* verify components */
+    check("model cfg.V preserved", b2->model->c.V == cfg.V);
+    check("model cfg.D preserved", b2->model->c.D == cfg.D);
+    check("model se.w[0] match", fclose_to(b2->model->se.w[0], se_w0, 1e-6f));
+    check("model proj.w[0] match", fclose_to(b2->model->proj.w[0], proj_w0, 1e-6f));
+
+    check("embed D preserved", b2->embed->D == cfg.D);
+    check("embed tok_emb.w[0] match", fclose_to(b2->embed->tok_emb.w[0], ee_tok0, 1e-6f));
+
+    check("head D preserved", b2->head->D == cfg.D);
+    check("head proj.w[0] match", fclose_to(b2->head->proj.w[0], eh_proj0, 1e-6f));
+
+    check("schema n preserved", b2->schema->n == schema_n);
+    check("schema total_vocab preserved", b2->schema->total_vocab == schema_total);
+
+    /* verify schema entries allow correct interpretation */
+    check("schema entry[0] is TEXT", b2->schema->entries[0].type == ADAPTER_TEXT);
+    check("schema entry[1] is SCALAR_BIN", b2->schema->entries[1].type == ADAPTER_SCALAR_BIN);
+    check("schema entry[1] modality == TEMP", b2->schema->entries[1].modality == MOD_TEMPERATURE);
+    check("schema entry[2] modality == TIME", b2->schema->entries[2].modality == MOD_TIME);
+
+    /* verify we can decode token ids using the loaded schema */
+    ScalarBinAdapter sba_temp = adapter_schema_get_scalar(b2->schema, 1);
+    check("temp adapter vocab_offset == 100", sba_temp.vocab_offset == 100);
+    check("temp adapter n_bins == 8", sba_temp.n_bins == 8);
+    float decoded = sba_decode(&sba_temp, 103);  /* bin 3 of 8 -> 3/7 */
+    check("temp sba_decode(103) == 3/7", fclose_to(decoded, 3.f/7.f, 1e-6f));
+
+    model_bundle_del(b2);
+    remove(path);
+}
+
+static int create_test_bundle_file(const char *path) {
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+
+    EventEmbed *ee = event_embed_new(cfg.D, 124, cfg.T);
+    event_embed_init(ee);
+
+    EventHead *eh = event_head_new(cfg.D, 124);
+    event_head_init(eh);
+
+    AdapterSchema *sc = adapter_schema_new();
+    adapter_schema_add_text(sc, 100);
+    adapter_schema_add_scalar(sc, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);
+    adapter_schema_add_scalar(sc, MOD_TIME, 0, 16, 0.f, 1.f);
+
+    ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+    int ok = model_bundle_save(b, path);
+    model_bundle_del(b);
+    return ok;
+}
+
+static int tamper_bundle_size_pair(const char *path, int idx) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) return -1;
+
+    long size_off = 4 + (long)sizeof(int);
+    int64_t sizes[4];
+    if (fseek(f, size_off, SEEK_SET) != 0) { fclose(f); return -1; }
+    if (fread(sizes, sizeof(int64_t), 4, f) != 4) { fclose(f); return -1; }
+
+    if (idx < 0 || idx > 3) { fclose(f); return -1; }
+    if (idx < 3) {
+        if (sizes[idx + 1] <= 1) { fclose(f); return -1; }
+        sizes[idx] += 1;
+        sizes[idx + 1] -= 1;
+    } else {
+        if (sizes[idx] <= 1) { fclose(f); return -1; }
+        sizes[idx] -= 1;
+        sizes[idx - 1] += 1;
+    }
+
+    if (fseek(f, size_off, SEEK_SET) != 0) { fclose(f); return -1; }
+    if (fwrite(sizes, sizeof(int64_t), 4, f) != 4) { fclose(f); return -1; }
+    fclose(f);
+    return 0;
+}
+
+static void test_model_bundle_validation(void) {
+    printf("[model_bundle validation]\n");
+
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+
+    /* D mismatch: embed D != model D */
+    {
+        Model *m = model_new(&cfg);
+        model_init(m);
+        EventEmbed *ee = event_embed_new(64, 100, cfg.T);  /* D=64 != model D=32 */
+        event_embed_init(ee);
+        EventHead *eh = event_head_new(cfg.D, 100);
+        event_head_init(eh);
+        AdapterSchema *sc = adapter_schema_new();
+        adapter_schema_add_text(sc, 100);
+
+        ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+        check("validate D mismatch returns -1", model_bundle_validate(b) == -1);
+        model_bundle_del(b);
+    }
+
+    /* V mismatch: schema total_vocab != embed V */
+    {
+        Model *m = model_new(&cfg);
+        model_init(m);
+        EventEmbed *ee = event_embed_new(cfg.D, 100, cfg.T);  /* V=100 */
+        event_embed_init(ee);
+        EventHead *eh = event_head_new(cfg.D, 100);
+        event_head_init(eh);
+        AdapterSchema *sc = adapter_schema_new();
+        adapter_schema_add_text(sc, 50);  /* schema total=50 != 100 */
+
+        ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+        check("validate V mismatch returns -1", model_bundle_validate(b) == -1);
+        model_bundle_del(b);
+    }
+
+    /* embed max_time < model T */
+    {
+        Model *m = model_new(&cfg);  /* T=16 */
+        model_init(m);
+        EventEmbed *ee = event_embed_new(cfg.D, 100, 8);  /* max_time=8 < 16 */
+        event_embed_init(ee);
+        EventHead *eh = event_head_new(cfg.D, 100);
+        event_head_init(eh);
+        AdapterSchema *sc = adapter_schema_new();
+        adapter_schema_add_text(sc, 100);
+
+        ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+        check("validate max_time<T returns -1", model_bundle_validate(b) == -1);
+        model_bundle_del(b);
+    }
+
+    /* valid bundle */
+    {
+        Model *m = model_new(&cfg);
+        model_init(m);
+        EventEmbed *ee = event_embed_new(cfg.D, 100, cfg.T);
+        event_embed_init(ee);
+        EventHead *eh = event_head_new(cfg.D, 100);
+        event_head_init(eh);
+        AdapterSchema *sc = adapter_schema_new();
+        adapter_schema_add_text(sc, 100);
+
+        ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+        check("validate consistent bundle returns 0", model_bundle_validate(b) == 0);
+        model_bundle_del(b);
+    }
+}
+
+static void test_model_bundle_component_boundaries(void) {
+    printf("[model_bundle component boundary rejection]\n");
+    const char *path = "test_bundle_boundary.bin";
+
+    check("create bundle for model_size tamper", create_test_bundle_file(path) == 0);
+    check("tamper model_size keeping total", tamper_bundle_size_pair(path, 0) == 0);
+    check("load model_size boundary mismatch returns NULL", model_bundle_load(path) == NULL);
+    remove(path);
+
+    check("create bundle for embed_size tamper", create_test_bundle_file(path) == 0);
+    check("tamper embed_size keeping total", tamper_bundle_size_pair(path, 1) == 0);
+    check("load embed_size boundary mismatch returns NULL", model_bundle_load(path) == NULL);
+    remove(path);
+
+    check("create bundle for head_size tamper", create_test_bundle_file(path) == 0);
+    check("tamper head_size keeping total", tamper_bundle_size_pair(path, 2) == 0);
+    check("load head_size boundary mismatch returns NULL", model_bundle_load(path) == NULL);
+    remove(path);
+
+    check("create bundle for schema_size tamper", create_test_bundle_file(path) == 0);
+    check("tamper schema_size keeping total", tamper_bundle_size_pair(path, 3) == 0);
+    check("load schema_size boundary mismatch returns NULL", model_bundle_load(path) == NULL);
+    remove(path);
+}
+
+static void test_model_bundle_null_safety(void) {
+    printf("[model_bundle NULL safety]\n");
+
+    /* validate(NULL) returns -1 */
+    check("model_bundle_validate(NULL) == -1", model_bundle_validate(NULL) == -1);
+
+    /* save(NULL, path) returns -1 */
+    check("model_bundle_save(NULL, path) == -1", model_bundle_save(NULL, "test.bin") == -1);
+
+    /* save(valid_bundle, NULL) returns -1 */
+    {
+        Cfg cfg = {.V=8,.T=4,.D=8,.H=2,.F=16,.L=1,.eps=1e-5f};
+        Model *m = model_new(&cfg);
+        model_init(m);
+        EventEmbed *ee = event_embed_new(cfg.D, 8, cfg.T);
+        event_embed_init(ee);
+        EventHead *eh = event_head_new(cfg.D, 8);
+        event_head_init(eh);
+        AdapterSchema *sc = adapter_schema_new();
+        adapter_schema_add_text(sc, 8);
+        ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+        check("model_bundle_save(valid, NULL) == -1", model_bundle_save(b, NULL) == -1);
+        model_bundle_del(b);
+    }
+
+    /* load(NULL) returns NULL */
+    check("model_bundle_load(NULL) == NULL", model_bundle_load(NULL) == NULL);
+
+    /* del(NULL) does not crash */
+    model_bundle_del(NULL);
+    check("model_bundle_del(NULL) no crash", 1);
+}
+
+static void test_model_bundle_malformed(void) {
+    printf("[model_bundle malformed file rejection]\n");
+    const char *path = "test_bad_bundle.bin";
+
+    /* bad magic */
+    {
+        FILE *f = fopen(path, "wb");
+        fwrite("XXXX", 1, 4, f);
+        fclose(f);
+        check("load bad magic returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    /* bad version */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 99;
+        int64_t sz = 100;
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fclose(f);
+        check("load bad version returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    /* negative component size */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1;
+        int64_t neg = -100, pos = 100;
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&neg, sizeof(int64_t), 1, f);  /* negative */
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fclose(f);
+        check("load negative size returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    /* zero component size */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1;
+        int64_t zero = 0, pos = 100;
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&zero, sizeof(int64_t), 1, f);  /* zero */
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fwrite(&pos, sizeof(int64_t), 1, f);
+        fclose(f);
+        check("load zero size returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    /* file size mismatch (header says more data than file has) */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1;
+        int64_t sz = 1000;  /* claim 4000 bytes of data */
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        fwrite(&sz, sizeof(int64_t), 1, f);
+        /* no data written */
+        fclose(f);
+        check("load file size mismatch returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    /* component size exceeds 1GB limit (BUNDLE_MAX_COMPONENT_SIZE) */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1;
+        int64_t huge = ((int64_t)1 << 30) + 1;  /* > 1GB */
+        int64_t small = 100;
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&huge, sizeof(int64_t), 1, f);
+        fwrite(&small, sizeof(int64_t), 1, f);
+        fwrite(&small, sizeof(int64_t), 1, f);
+        fwrite(&small, sizeof(int64_t), 1, f);
+        fclose(f);
+        check("load huge component size returns NULL", model_bundle_load(path) == NULL);
+    }
+
+    remove(path);
+}
+
+static void test_adapter_schema_malformed(void) {
+    printf("[adapter_schema malformed file rejection]\n");
+    const char *path = "test_malformed_schema.bin";
+
+    /* unknown type (type=99) */
+    write_malformed_schema(path, 1, 100, 99, 0, 0, 0, 100, 0.f, 1.f);
+    check("load unknown type returns NULL", adapter_schema_load(path) == NULL);
+
+    /* inconsistent total_vocab (header says 200, entry has 100) */
+    write_malformed_schema(path, 1, 200, ADAPTER_TEXT, 0, 0, 0, 100, 0.f, 1.f);
+    check("load inconsistent total_vocab returns NULL", adapter_schema_load(path) == NULL);
+
+    /* scalar with vocab_count < 2 */
+    write_malformed_schema(path, 1, 1, ADAPTER_SCALAR_BIN, MOD_TEMPERATURE, 0, 0, 1, 0.f, 1.f);
+    check("load scalar vocab_count<2 returns NULL", adapter_schema_load(path) == NULL);
+
+    /* negative offset */
+    write_malformed_schema(path, 1, 100, ADAPTER_TEXT, 0, 0, -1, 100, 0.f, 1.f);
+    check("load negative offset returns NULL", adapter_schema_load(path) == NULL);
+
+    /* text not at offset 0 */
+    write_malformed_schema(path, 1, 100, ADAPTER_TEXT, 0, 0, 10, 100, 0.f, 1.f);
+    check("load text offset!=0 returns NULL", adapter_schema_load(path) == NULL);
+
+    /* out-of-range modality for scalar */
+    write_malformed_schema(path, 1, 8, ADAPTER_SCALAR_BIN, 99, 0, 0, 8, 0.f, 1.f);
+    check("load out-of-range modality returns NULL", adapter_schema_load(path) == NULL);
+
+    /* out-of-range channel for scalar */
+    write_malformed_schema(path, 1, 8, ADAPTER_SCALAR_BIN, MOD_TEMPERATURE, 99, 0, 8, 0.f, 1.f);
+    check("load out-of-range channel returns NULL", adapter_schema_load(path) == NULL);
+
+    /* val_min >= val_max for scalar */
+    write_malformed_schema(path, 1, 8, ADAPTER_SCALAR_BIN, MOD_TEMPERATURE, 0, 0, 8, 1.f, 0.f);
+    check("load val_min>=val_max returns NULL", adapter_schema_load(path) == NULL);
+
+    /* truncated file (n=1 but no entry data) */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1, n = 1, tv = 100;
+        fwrite("ADSC", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&n, sizeof(int), 1, f);
+        fwrite(&tv, sizeof(int), 1, f);
+        /* no entry written */
+        fclose(f);
+    }
+    check("load truncated file returns NULL", adapter_schema_load(path) == NULL);
+
+    remove(path);
+}
+
 int main(void) {
     srand(0);
     printf("=== MyLLM unit tests ===\n\n");
@@ -769,6 +1282,14 @@ int main(void) {
     test_model_fwd_validation();
     test_model_encode_validation();
     test_decode_cache_precompute_validation();
+    test_adapter_schema();
+    test_adapter_schema_validation();
+    test_adapter_schema_malformed();
+    test_model_bundle();
+    test_model_bundle_validation();
+    test_model_bundle_component_boundaries();
+    test_model_bundle_null_safety();
+    test_model_bundle_malformed();
     printf("\n%d passed, %d failed\n", n_pass, n_fail);
     return n_fail > 0 ? 1 : 0;
 }

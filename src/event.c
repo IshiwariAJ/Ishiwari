@@ -271,9 +271,9 @@ void event_head_bwd(const EventHead *h, const Mat *hidden,
 static int ev_wr(const void *p, size_t sz, size_t n, FILE *f) { return fwrite(p,sz,n,f)==n; }
 static int ev_rd(void *p, size_t sz, size_t n, FILE *f)       { return fread(p,sz,n,f)==n; }
 
-int event_embed_save(const EventEmbed *e, const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
+/* --- internal save/load to FILE* --- */
+
+static int event_embed_save_to_fp(const EventEmbed *e, FILE *f) {
     int ok = 1, ver = 1;
     ok &= ev_wr("EVEM",1,4,f);
     ok &= ev_wr(&ver,sizeof(int),1,f);
@@ -285,25 +285,19 @@ int event_embed_save(const EventEmbed *e, const char *path) {
     ok &= ev_wr(e->tok_emb.w, sizeof(float), e->tok_emb.n, f);
     ok &= ev_wr(e->val_w.w,   sizeof(float), e->val_w.n,   f);
     ok &= ev_wr(e->val_b.w,   sizeof(float), e->val_b.n,   f);
-    fclose(f);
     return ok ? 0 : -1;
 }
 
-EventEmbed *event_embed_load(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+static EventEmbed *event_embed_load_from_fp(FILE *f) {
     char magic[4]; int ver, D, V, T;
-    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVEM",4)!=0) { fclose(f); return NULL; }
-    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
+    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVEM",4)!=0) return NULL;
+    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1) return NULL;
     if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) ||
-        !ev_rd(&T,sizeof(int),1,f) || D<=0 || V<=0 || T<=0) { fclose(f); return NULL; }
-    /* upper bounds check */
-    if (D > EV_MAX_D || V > EV_MAX_V || T > EV_MAX_T) { fclose(f); return NULL; }
-    /* total parameter count: mod_emb + chan_emb + tok_emb + val_w + val_b + pos
-     * ~ EVENT_MAX_MOD*D + EVENT_MAX_CHAN*D + V*D + 2*D + T*D */
+        !ev_rd(&T,sizeof(int),1,f) || D<=0 || V<=0 || T<=0) return NULL;
+    if (D > EV_MAX_D || V > EV_MAX_V || T > EV_MAX_T) return NULL;
     {
         int64_t params = (int64_t)(EVENT_MAX_MOD + EVENT_MAX_CHAN + 2) * D + (int64_t)V * D + (int64_t)T * D;
-        if (params > EV_MAX_PARAMS) { fclose(f); return NULL; }
+        if (params > EV_MAX_PARAMS) return NULL;
     }
     EventEmbed *e = event_embed_new(D, V, T);
     int ok = 1;
@@ -312,14 +306,11 @@ EventEmbed *event_embed_load(const char *path) {
     ok &= ev_rd(e->tok_emb.w, sizeof(float), e->tok_emb.n, f);
     ok &= ev_rd(e->val_w.w,   sizeof(float), e->val_w.n,   f);
     ok &= ev_rd(e->val_b.w,   sizeof(float), e->val_b.n,   f);
-    fclose(f);
     if (!ok) { event_embed_del(e); return NULL; }
     return e;
 }
 
-int event_head_save(const EventHead *h, const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
+static int event_head_save_to_fp(const EventHead *h, FILE *f) {
     int ok = 1, ver = 1;
     ok &= ev_wr("EVHD",1,4,f);
     ok &= ev_wr(&ver,sizeof(int),1,f);
@@ -327,32 +318,76 @@ int event_head_save(const EventHead *h, const char *path) {
     ok &= ev_wr(&h->V,sizeof(int),1,f);
     ok &= ev_wr(h->proj.w,  sizeof(float), h->proj.n,  f);
     ok &= ev_wr(h->proj_b.w,sizeof(float), h->proj_b.n,f);
-    fclose(f);
     return ok ? 0 : -1;
 }
 
-EventHead *event_head_load(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+static EventHead *event_head_load_from_fp(FILE *f) {
     char magic[4]; int ver, D, V;
-    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVHD",4)!=0) { fclose(f); return NULL; }
-    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
-    if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) || D<=0 || V<=0) {
-        fclose(f); return NULL;
-    }
-    /* upper bounds check */
-    if (D > EV_MAX_D || V > EV_MAX_V) { fclose(f); return NULL; }
-    /* total parameter count: proj (D*V) + proj_b (V) */
+    if (!ev_rd(magic,1,4,f) || memcmp(magic,"EVHD",4)!=0) return NULL;
+    if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1) return NULL;
+    if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) || D<=0 || V<=0) return NULL;
+    if (D > EV_MAX_D || V > EV_MAX_V) return NULL;
     {
         int64_t params = (int64_t)D * V + V;
-        if (params > EV_MAX_PARAMS) { fclose(f); return NULL; }
+        if (params > EV_MAX_PARAMS) return NULL;
     }
     EventHead *h = event_head_new(D, V);
     int ok = 1;
     ok &= ev_rd(h->proj.w,  sizeof(float), h->proj.n,  f);
     ok &= ev_rd(h->proj_b.w,sizeof(float), h->proj_b.n,f);
-    fclose(f);
     if (!ok) { event_head_del(h); return NULL; }
     return h;
+}
+
+/* --- public API --- */
+
+int event_embed_save(const EventEmbed *e, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int result = event_embed_save_to_fp(e, f);
+    fclose(f);
+    return result;
+}
+
+EventEmbed *event_embed_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    EventEmbed *e = event_embed_load_from_fp(f);
+    fclose(f);
+    return e;
+}
+
+int event_head_save(const EventHead *h, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int result = event_head_save_to_fp(h, f);
+    fclose(f);
+    return result;
+}
+
+EventHead *event_head_load(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    EventHead *h = event_head_load_from_fp(f);
+    fclose(f);
+    return h;
+}
+
+/* --- FILE* API for bundle direct serialization --- */
+
+int event_embed_save_fp(const EventEmbed *e, FILE *f) {
+    return event_embed_save_to_fp(e, f);
+}
+
+EventEmbed *event_embed_load_fp(FILE *f) {
+    return event_embed_load_from_fp(f);
+}
+
+int event_head_save_fp(const EventHead *h, FILE *f) {
+    return event_head_save_to_fp(h, f);
+}
+
+EventHead *event_head_load_fp(FILE *f) {
+    return event_head_load_from_fp(f);
 }
 
