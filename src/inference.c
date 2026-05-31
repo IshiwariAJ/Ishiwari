@@ -1,9 +1,10 @@
-#include "model.h"
+﻿#include "model.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
-/* ── DecodeCache ─────────────────────────────────────── */
+/* --- DecodeCache--- */
 
 DecodeCache *decode_cache_new(const Cfg *cfg) {
     DecodeCache *c = (DecodeCache*)calloc(1, sizeof(DecodeCache));
@@ -38,10 +39,23 @@ void decode_cache_reset(DecodeCache *c) {
         c->layers[l].self.len = 0;
 }
 
-/* ── model_encode ────────────────────────────────────── */
+/* --- model_encode--- */
 
-void model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out) {
-    int D = m->c.D;
+int model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out) {
+    int D = m->c.D, V = m->c.V, T = m->c.T;
+
+    /* input validation */
+    if (SL <= 0 || SL > T) {
+        fprintf(stderr, "model_encode: SL=%d out of range (0,%d]\n", SL, T);
+        return -1;
+    }
+    for (int i = 0; i < SL; i++) {
+        if (src[i] < 0 || src[i] >= V) {
+            fprintf(stderr, "model_encode: src[%d]=%d out of range [0,%d)\n", i, src[i], V);
+            return -1;
+        }
+    }
+
     Mat enc_in = mat_new(SL, D);
     for (int t = 0; t < SL; t++) {
         float *dst = enc_in.d + t*D;
@@ -57,14 +71,26 @@ void model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out) {
     }
     memcpy(enc_out->d, cur.d, (size_t)SL * D * sizeof(float));
     mat_del(&enc_in);
+
+    /* update output shape to actual size */
+    enc_out->r = SL;
+    enc_out->c = D;
+    return 0;
 }
 
-/* ── decode_cache_precompute_cross ───────────────────── */
+/* --- decode_cache_precompute_cross--- */
 
-void decode_cache_precompute_cross(DecodeCache *c, Model *m,
+int decode_cache_precompute_cross(DecodeCache *c, Model *m,
                                    const Mat *enc_out) {
     int D  = m->c.D;
     int SL = enc_out->r;
+
+    /* input validation */
+    if (SL <= 0 || SL > c->max_len) {
+        fprintf(stderr, "decode_cache_precompute_cross: SL=%d out of range (0,%d]\n", SL, c->max_len);
+        return -1;
+    }
+
     for (int l = 0; l < m->c.L; l++) {
         AW *ca = &m->dec[l].ca;
         Mat Wk  = {ca->Wk.w, D, D};
@@ -75,9 +101,10 @@ void decode_cache_precompute_cross(DecodeCache *c, Model *m,
         mm(enc_out, &Wv, &V_s); add_bias(&V_s, ca->bv.w);
         c->layers[l].cross.len = SL;
     }
+    return 0;
 }
 
-/* ── single-query multi-head attention ───────────────── */
+/* --- single-query multi-head attention--- */
 /*
  * q   : (D,)  query for one token
  * K,V : (len x D)  cached keys/values
@@ -112,7 +139,7 @@ static void attn_1q(const float *q, const float *K, const float *V,
     free(scores);
 }
 
-/* ── model_decode_step ───────────────────────────────── */
+/* --- model_decode_step--- */
 /*
  * Runs one decoder step using KV cache.
  * token        : current input token id
@@ -166,7 +193,7 @@ int model_decode_step(Model *m, int token, int pos,
         DLayerKV *lkv = &kv->layers[l];
         int len = lkv->self.len;
 
-        /* ── Masked self-attention ─────────────────────── */
+        /* --- Masked self-attention--- */
         /* Q = h @ Wq + bq */
         {   Mat Wq={dl->sa.Wq.w,D,D}; Mat h_m={h,1,D}; Mat q_m={q,1,D};
             mm(&h_m,&Wq,&q_m); add_bias(&q_m,dl->sa.bq.w); }
@@ -188,7 +215,7 @@ int model_decode_step(Model *m, int token, int pos,
             Mat r={tmp,1,D}; Mat h_m={h,1,D};
             ln_fwd(&r,&dl->ln1,&h_m,&mn,&vr,m->c.eps); }
 
-        /* ── Cross-attention ───────────────────────────── */
+        /* --- Cross-attention--- */
         /* Q = h @ Wq_ca + bq_ca */
         {   Mat Wq={dl->ca.Wq.w,D,D}; Mat h_m={h,1,D}; Mat q_m={q,1,D};
             mm(&h_m,&Wq,&q_m); add_bias(&q_m,dl->ca.bq.w); }
@@ -201,7 +228,7 @@ int model_decode_step(Model *m, int token, int pos,
             Mat r={tmp,1,D}; Mat h_m={h,1,D};
             ln_fwd(&r,&dl->ln2,&h_m,&mn,&vr,m->c.eps); }
 
-        /* ── FFN ───────────────────────────────────────── */
+        /* --- FFN--- */
         {   Mat W1={dl->ff.W1.w,D,F}; Mat h_m={h,1,D}; Mat ffh_m={ffh,1,F};
             mm(&h_m,&W1,&ffh_m); add_bias(&ffh_m,dl->ff.b1.w);
             gelu_fwd(&ffh_m,&ffh_m); }

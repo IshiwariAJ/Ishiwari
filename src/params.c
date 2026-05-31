@@ -1,10 +1,10 @@
-#include "model.h"
+﻿#include "model.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 
-/* ── P ─────────────────────────────────────────────── */
+/* --- P--- */
 P p_new(int n) {
     P p; p.n = n;
     p.w = (float*)calloc(n, sizeof(float));
@@ -17,7 +17,7 @@ P p_new(int n) {
 void p_del(P *p) { free(p->w); free(p->g); free(p->m); free(p->v); p->n=0; }
 void p_zg(P *p)  { memset(p->g, 0, p->n * sizeof(float)); }
 
-/* ── LN ────────────────────────────────────────────── */
+/* --- LN--- */
 LN ln_new(int d) {
     LN ln; ln.scale = p_new(d); ln.shift = p_new(d);
     /* init gamma=1, beta=0 */
@@ -27,7 +27,7 @@ LN ln_new(int d) {
 void ln_del(LN *ln) { p_del(&ln->scale); p_del(&ln->shift); }
 void ln_zg(LN *ln)  { p_zg(&ln->scale); p_zg(&ln->shift); }
 
-/* ── AW ────────────────────────────────────────────── */
+/* --- AW--- */
 AW aw_new(int D) {
     AW a;
     a.Wq = p_new(D*D); a.Wk = p_new(D*D);
@@ -45,7 +45,7 @@ void aw_zg(AW *a) {
     p_zg(&a->bq); p_zg(&a->bk); p_zg(&a->bv); p_zg(&a->bo);
 }
 
-/* ── FW ────────────────────────────────────────────── */
+/* --- FW--- */
 FW fw_new(int D, int F) {
     FW f;
     f.W1 = p_new(D*F); f.b1 = p_new(F);
@@ -59,7 +59,7 @@ void fw_zg(FW *f) {
     p_zg(&f->W1); p_zg(&f->b1); p_zg(&f->W2); p_zg(&f->b2);
 }
 
-/* ── EL / DL ───────────────────────────────────────── */
+/* --- EL / DL--- */
 EL el_new(int D, int F) {
     EL e; e.sa=aw_new(D); e.ff=fw_new(D,F);
     e.ln1=ln_new(D); e.ln2=ln_new(D);
@@ -81,7 +81,7 @@ void dl_zg(DL *d) {
     ln_zg(&d->ln1); ln_zg(&d->ln2); ln_zg(&d->ln3);
 }
 
-/* ── Caches ────────────────────────────────────────── */
+/* --- Caches--- */
 static void ac_init(AC *c, int T, int D, int H) {
     c->Q  = mat_new(T, D); c->K  = mat_new(T, D); c->V  = mat_new(T, D);
     c->hs = (float*)calloc((size_t)H*T*T, sizeof(float));
@@ -161,7 +161,7 @@ void dc_del(DC *d) {
     free(d);
 }
 
-/* ── Model alloc/del/init ───────────────────────────── */
+/* --- Model alloc/del/init--- */
 static void make_pos(float *pos, int T, int D) {
     for (int t = 0; t < T; t++)
         for (int d = 0; d < D; d++) {

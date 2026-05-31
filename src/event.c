@@ -1,8 +1,15 @@
-#include "event.h"
+﻿#include "event.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdint.h>
+
+/* upper bounds for event config values (conservative for small project) */
+#define EV_MAX_D 2048      /* max embedding dim */
+#define EV_MAX_V 100000    /* max event vocab */
+#define EV_MAX_T 4096      /* max time steps */
+#define EV_MAX_PARAMS ((int64_t)100 * 1000 * 1000)  /* max 100M parameters */
 
 EventSeq *event_seq_new(int capacity) {
     EventSeq *s = (EventSeq*)calloc(1, sizeof(EventSeq));
@@ -69,7 +76,7 @@ int event_append_scalar(EventSeq *s, const float *vals, int len,
     return 0;
 }
 
-/* ── EventEmbed ──────────────────────────────────────── */
+/* --- EventEmbed--- */
 
 static void make_sinusoidal(float *pos, int T, int D) {
     for (int t = 0; t < T; t++)
@@ -214,7 +221,7 @@ void event_embed_bwd(const EventSeq *s, const EventEmbed *e,
     }
 }
 
-/* ── EventHead ───────────────────────────────────────── */
+/* --- EventHead--- */
 
 EventHead *event_head_new(int D, int V) {
     EventHead *h = (EventHead*)calloc(1, sizeof(EventHead));
@@ -259,7 +266,7 @@ void event_head_bwd(const EventHead *h, const Mat *hidden,
     bias_bwd(d_logits, dh->proj_b.g);
 }
 
-/* ── EventEmbed / EventHead serialization ────────────── */
+/* --- EventEmbed / EventHead serialization--- */
 
 static int ev_wr(const void *p, size_t sz, size_t n, FILE *f) { return fwrite(p,sz,n,f)==n; }
 static int ev_rd(void *p, size_t sz, size_t n, FILE *f)       { return fread(p,sz,n,f)==n; }
@@ -290,6 +297,14 @@ EventEmbed *event_embed_load(const char *path) {
     if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
     if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) ||
         !ev_rd(&T,sizeof(int),1,f) || D<=0 || V<=0 || T<=0) { fclose(f); return NULL; }
+    /* upper bounds check */
+    if (D > EV_MAX_D || V > EV_MAX_V || T > EV_MAX_T) { fclose(f); return NULL; }
+    /* total parameter count: mod_emb + chan_emb + tok_emb + val_w + val_b + pos
+     * ~ EVENT_MAX_MOD*D + EVENT_MAX_CHAN*D + V*D + 2*D + T*D */
+    {
+        int64_t params = (int64_t)(EVENT_MAX_MOD + EVENT_MAX_CHAN + 2) * D + (int64_t)V * D + (int64_t)T * D;
+        if (params > EV_MAX_PARAMS) { fclose(f); return NULL; }
+    }
     EventEmbed *e = event_embed_new(D, V, T);
     int ok = 1;
     ok &= ev_rd(e->mod_emb.w, sizeof(float), e->mod_emb.n, f);
@@ -324,6 +339,13 @@ EventHead *event_head_load(const char *path) {
     if (!ev_rd(&ver,sizeof(int),1,f) || ver!=1)           { fclose(f); return NULL; }
     if (!ev_rd(&D,sizeof(int),1,f) || !ev_rd(&V,sizeof(int),1,f) || D<=0 || V<=0) {
         fclose(f); return NULL;
+    }
+    /* upper bounds check */
+    if (D > EV_MAX_D || V > EV_MAX_V) { fclose(f); return NULL; }
+    /* total parameter count: proj (D*V) + proj_b (V) */
+    {
+        int64_t params = (int64_t)D * V + V;
+        if (params > EV_MAX_PARAMS) { fclose(f); return NULL; }
     }
     EventHead *h = event_head_new(D, V);
     int ok = 1;

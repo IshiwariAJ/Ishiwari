@@ -1,4 +1,4 @@
-/*
+﻿/*
  * EventEmbed end-to-end training demo.
  *
  * Full pipeline:
@@ -47,7 +47,7 @@
 #define D_FF        64
 #define N_LAYERS    1
 
-/* ── Adam step for a P ───────────────────────────────── */
+/* --- Adam step for a P--- */
 static void adam_p(P *p, float lr_t, float b1, float b2, float eps) {
     for (int i = 0; i < p->n; i++) {
         p->m[i] = b1*p->m[i] + (1.f-b1)*p->g[i];
@@ -73,7 +73,7 @@ static void adam_event_head(EventHead *h, int step,
     adam_p(&h->proj_b, lr_t, b1, b2, eps);
 }
 
-/* ── Deterministic task rule (learnable) ─────────────── */
+/* --- Deterministic task rule (learnable)--- */
 /*
  * The demo task is a deterministic 3-modality cycle (TEXT -> TEMP -> TIME),
  * so the model CAN learn it (unlike the earlier random task whose loss
@@ -172,7 +172,7 @@ static void make_event_pair(EventSeq *s,
     (void)cur;
 }
 
-/* ── Forward + loss + backward ───────────────────────── */
+/* --- Forward + loss + backward--- */
 static float step_fwd_bwd(
         EventSeq *seq, const int *lbl,
         EventEmbed *ee, EventHead *eh,
@@ -256,7 +256,7 @@ static const char *mod_name(int modality) {
     }
 }
 
-/* ── Greedy decode: generate next event token by token ── */
+/* --- Greedy decode: generate next event token by token--- */
 /*
  * Re-runs the full causal encoder over the growing prefix at each step.
  * This is correct but NOT KV-cached: the self-attention cost grows with the
@@ -343,7 +343,7 @@ static void greedy_decode_event(
     event_seq_del(seq);
 }
 
-/* ── Public entry point ──────────────────────────────── */
+/* --- Public entry point--- */
 void run_event_task(void) {
     printf("\n=== EventEmbed end-to-end demo (3 modalities) ===\n");
     printf("Pipeline: Text/Temp/Time Adapter -> EventSeq ->\n");

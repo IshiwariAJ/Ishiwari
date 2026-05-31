@@ -1,7 +1,7 @@
-#include "adapters.h"
+﻿#include "adapters.h"
 #include <stdio.h>
 
-/* ── ScalarBinAdapter ────────────────────────────────── */
+/* --- ScalarBinAdapter--- */
 
 int sba_encode(const ScalarBinAdapter *a, EventSeq *s, float val, int time_index) {
     if (a->n_bins < 2) {
@@ -46,7 +46,7 @@ int sba_label(const ScalarBinAdapter *a, float val) {
     return a->vocab_offset + bin;
 }
 
-/* ── TextAdapter ─────────────────────────────────────── */
+/* --- TextAdapter--- */
 
 int ta_encode(const TextAdapter *a, EventSeq *s,
               const int *ids, int len, int start_time) {
@@ -64,7 +64,7 @@ int ta_owns(const TextAdapter *a, int token_id) {
     return token_id >= 0 && token_id < a->vocab_size;
 }
 
-/* ── Output adapter: EventHead logits -> EventSeq ────── */
+/* --- Output adapter: EventHead logits -> EventSeq--- */
 
 int event_head_to_seq(const Mat *logits,
                       const TextAdapter *ta,

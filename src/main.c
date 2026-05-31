@@ -1,4 +1,4 @@
-#include "model.h"
+﻿#include "model.h"
 #include "event.h"
 #include <stdio.h>
 
@@ -85,15 +85,18 @@ int main(void) {
     for (int step = 0; step < STEPS; step++) {
         make_copy_pair(src, tgt, lbl, &SL, &TL);
 
-        enc_out.r = SL;
-        dec_out.r = TL;
-        logits.r  = TL;
-
-        model_fwd(m, src, SL, tgt, TL, ec, dc, &enc_out, &dec_out, &logits);
+        if (model_fwd(m, src, SL, tgt, TL, ec, dc, &enc_out, &dec_out, &logits) != 0) {
+            fprintf(stderr, "model_fwd failed at step %d, skipping\n", step);
+            continue;
+        }
 
         model_zg(m);
         float loss = model_loss_bwd(m, src, SL, tgt, TL, lbl,
                                     ec, dc, &enc_out, &dec_out, &logits);
+        if (loss < 0.f) {
+            fprintf(stderr, "model_loss_bwd failed at step %d, skipping\n", step);
+            continue;
+        }
         opt_step(m, &opt);
 
         smooth  = (step == 0) ? loss : 0.99f*smooth + 0.01f*loss;
@@ -120,8 +123,7 @@ int main(void) {
     int gen[MAX_SEQ]; gen[0] = BOS;
     int gl = 1;
     for (int step = 0; step < MAX_SEQ-1; step++) {
-        enc_out.r = SL; dec_out.r = gl; logits.r = gl;
-        model_fwd(m, src, SL, gen, gl, ec, dc, &enc_out, &dec_out, &logits);
+        if (model_fwd(m, src, SL, gen, gl, ec, dc, &enc_out, &dec_out, &logits) != 0) break;
         float *row = logits.d + (gl-1)*cfg.V;
         int best = 0;
         for (int j = 1; j < cfg.V; j++) if (row[j]>row[best]) best=j;
@@ -132,11 +134,17 @@ int main(void) {
 
     /* greedy decode — KV cache */
     printf("\n-- Greedy decode (KV cache) --\n");
-    enc_out.r = SL;
-    model_encode(m, src, SL, ec, &enc_out);
+    if (model_encode(m, src, SL, ec, &enc_out) != 0) {
+        fprintf(stderr, "model_encode failed\n");
+        return 1;
+    }
 
     DecodeCache *dkv = decode_cache_new(&cfg);
-    decode_cache_precompute_cross(dkv, m, &enc_out);
+    if (decode_cache_precompute_cross(dkv, m, &enc_out) != 0) {
+        fprintf(stderr, "decode_cache_precompute_cross failed\n");
+        decode_cache_del(dkv);
+        return 1;
+    }
 
     Mat logits1 = mat_new(1, cfg.V);
     int gen2[MAX_SEQ]; gen2[0] = BOS;
@@ -158,7 +166,7 @@ int main(void) {
     decode_cache_del(dkv);
     mat_del(&logits1);
 
-    /* ── Inference timing benchmark ──────────────────────── */
+    /* --- Inference timing benchmark--- */
     printf("\n-- Inference timing benchmark (N=200 sequences) --\n");
     int N_BENCH = 200;
     clock_t t0, t1;
@@ -169,8 +177,7 @@ int main(void) {
         make_copy_pair(src, tgt, lbl, &SL, &TL);
         int g[MAX_SEQ]; g[0] = BOS; int gl_b = 1;
         for (int step = 0; step < MAX_SEQ-1; step++) {
-            enc_out.r = SL; dec_out.r = gl_b; logits.r = gl_b;
-            model_fwd(m, src, SL, g, gl_b, ec, dc, &enc_out, &dec_out, &logits);
+            if (model_fwd(m, src, SL, g, gl_b, ec, dc, &enc_out, &dec_out, &logits) != 0) break;
             float *row = logits.d + (gl_b-1)*cfg.V;
             int best = 0;
             for (int j = 1; j < cfg.V; j++) if (row[j]>row[best]) best=j;
@@ -187,9 +194,8 @@ int main(void) {
     t0 = clock();
     for (int r = 0; r < N_BENCH; r++) {
         make_copy_pair(src, tgt, lbl, &SL, &TL);
-        enc_out.r = SL;
-        model_encode(m, src, SL, ec, &enc_out);
-        decode_cache_precompute_cross(bench_kv, m, &enc_out);
+        if (model_encode(m, src, SL, ec, &enc_out) != 0) continue;
+        if (decode_cache_precompute_cross(bench_kv, m, &enc_out) != 0) continue;
         decode_cache_reset(bench_kv);
         int g[MAX_SEQ]; g[0] = BOS; int gl_k = 1;
         for (int step = 0; step < MAX_SEQ-1; step++) {
@@ -209,7 +215,7 @@ int main(void) {
     decode_cache_del(bench_kv);
     mat_del(&logits_b);
 
-    /* ── EventEmbed mixed demo ───────────────────────────── */
+    /* --- EventEmbed mixed demo--- */
     printf("\n-- EventEmbed: text + scalar mixed sequence --\n");
     EventEmbed *ee = event_embed_new(cfg.D, cfg.V, cfg.T);
     event_embed_init(ee);
@@ -235,7 +241,7 @@ int main(void) {
     event_seq_del(ev);
     event_embed_del(ee);
 
-    /* ── EventEmbed training demo ─────────────────────── */
+    /* --- EventEmbed training demo--- */
     run_event_task();
 
     /* cleanup */

@@ -13,13 +13,36 @@
  *   enc_out  : (SL × D)  final encoder output
  *   dec_out  : (TL × D)  final decoder output
  *   logits   : (TL × V)  pre-softmax output
+ * Returns 0 on success, -1 on invalid input.
  */
-void model_fwd(Model *m,
+int model_fwd(Model *m,
                const int *src, int SL,
                const int *tgt, int TL,
                EC **ec, DC **dc,
                Mat *enc_out, Mat *dec_out, Mat *logits) {
-    int D = m->c.D, V = m->c.V;
+    int D = m->c.D, V = m->c.V, T = m->c.T;
+
+    /* input validation */
+    if (SL <= 0 || SL > T) {
+        fprintf(stderr, "model_fwd: SL=%d out of range (0,%d]\n", SL, T);
+        return -1;
+    }
+    if (TL <= 0 || TL > T) {
+        fprintf(stderr, "model_fwd: TL=%d out of range (0,%d]\n", TL, T);
+        return -1;
+    }
+    for (int i = 0; i < SL; i++) {
+        if (src[i] < 0 || src[i] >= V) {
+            fprintf(stderr, "model_fwd: src[%d]=%d out of range [0,%d)\n", i, src[i], V);
+            return -1;
+        }
+    }
+    for (int i = 0; i < TL; i++) {
+        if (tgt[i] < 0 || tgt[i] >= V) {
+            fprintf(stderr, "model_fwd: tgt[%d]=%d out of range [0,%d)\n", i, tgt[i], V);
+            return -1;
+        }
+    }
 
     /* -- Encoder -- */
     /* embed src tokens + positional encoding */
@@ -66,12 +89,18 @@ void model_fwd(Model *m,
     Mat proj = {m->proj.w, D, V};
     mm(dec_out, &proj, logits);
     add_bias(logits, m->proj_b.w);
+
+    /* update output shapes to actual sizes */
+    enc_out->r = SL; enc_out->c = D;
+    dec_out->r = TL; dec_out->c = D;
+    logits->r  = TL; logits->c  = V;
+    return 0;
 }
 
 /*
  * Compute cross-entropy loss and run full backward pass.
  * lbl[TL] : ground-truth token ids for each decoder output position
- * Returns average cross-entropy loss.
+ * Returns average cross-entropy loss, or -1.0f on invalid input.
  */
 float model_loss_bwd(Model *m,
                      const int *src, int SL,
@@ -80,8 +109,36 @@ float model_loss_bwd(Model *m,
                      EC **ec, DC **dc,
                      const Mat *enc_out, const Mat *dec_out,
                      const Mat *logits) {
-    int D = m->c.D, V = m->c.V, L = m->c.L;
+    int D = m->c.D, V = m->c.V, L = m->c.L, T = m->c.T;
     (void)enc_out;
+
+    /* input validation */
+    if (SL <= 0 || SL > T) {
+        fprintf(stderr, "model_loss_bwd: SL=%d out of range (0,%d]\n", SL, T);
+        return -1.0f;
+    }
+    if (TL <= 0 || TL > T) {
+        fprintf(stderr, "model_loss_bwd: TL=%d out of range (0,%d]\n", TL, T);
+        return -1.0f;
+    }
+    for (int i = 0; i < SL; i++) {
+        if (src[i] < 0 || src[i] >= V) {
+            fprintf(stderr, "model_loss_bwd: src[%d]=%d out of range [0,%d)\n", i, src[i], V);
+            return -1.0f;
+        }
+    }
+    for (int i = 0; i < TL; i++) {
+        if (tgt[i] < 0 || tgt[i] >= V) {
+            fprintf(stderr, "model_loss_bwd: tgt[%d]=%d out of range [0,%d)\n", i, tgt[i], V);
+            return -1.0f;
+        }
+    }
+    for (int i = 0; i < TL; i++) {
+        if (lbl[i] < 0 || lbl[i] >= V) {
+            fprintf(stderr, "model_loss_bwd: lbl[%d]=%d out of range [0,%d)\n", i, lbl[i], V);
+            return -1.0f;
+        }
+    }
 
     /* softmax + cross-entropy loss, compute d_logits */
     Mat d_logits = mat_new(TL, V);

@@ -1,4 +1,4 @@
-#ifndef EVENT_H
+﻿#ifndef EVENT_H
 #define EVENT_H
 
 #include "model.h"
@@ -126,7 +126,7 @@ void event_head_fwd(const EventHead *h, const Mat *hidden, Mat *logits);
 void event_head_bwd(const EventHead *h, const Mat *hidden,
                     const Mat *d_logits, Mat *d_hidden, EventHead *dh);
 
-/* ── EventEmbed / EventHead serialization ────────────── */
+/* --- EventEmbed / EventHead serialization--- */
 /* save: 0 ok / -1 fail. load: new object (free with *_del) / NULL fail. */
 int         event_embed_save(const EventEmbed *e, const char *path);
 EventEmbed *event_embed_load(const char *path);

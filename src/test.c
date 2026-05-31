@@ -1,4 +1,4 @@
-#include "model.h"
+﻿#include "model.h"
 #include "event.h"
 #include "adapters.h"
 #include <stdio.h>
@@ -6,7 +6,7 @@
 #include <math.h>
 #include <string.h>
 
-/* ── helpers ─────────────────────────────────────────── */
+/* --- helpers--- */
 
 static int n_pass = 0, n_fail = 0;
 
@@ -19,7 +19,7 @@ static int fclose_to(float a, float b, float tol) {
     return fabsf(a - b) < tol;
 }
 
-/* ── matrix ──────────────────────────────────────────── */
+/* --- matrix--- */
 
 static void test_mm(void) {
     printf("[mm]\n");
@@ -66,7 +66,7 @@ static void test_mm_at(void) {
     mat_del(&A); mat_del(&B); mat_del(&C);
 }
 
-/* ── GELU ────────────────────────────────────────────── */
+/* --- GELU--- */
 
 static void test_gelu(void) {
     printf("[gelu_fwd]\n");
@@ -101,7 +101,7 @@ static void test_gelu_bwd(void) {
     mat_del(&xc);mat_del(&dx);mat_del(&dy);
 }
 
-/* ── softmax ─────────────────────────────────────────── */
+/* --- softmax--- */
 
 static void test_softmax(void) {
     printf("[softmax_fwd]\n");
@@ -120,7 +120,7 @@ static void test_softmax(void) {
     mat_del(&x); mat_del(&y);
 }
 
-/* ── LayerNorm ───────────────────────────────────────── */
+/* --- LayerNorm--- */
 
 static void test_layernorm(void) {
     printf("[ln_fwd]\n");
@@ -201,7 +201,7 @@ static void test_layernorm_bwd(void) {
     mat_del(&xp);mat_del(&xm);mat_del(&yp);mat_del(&ym);
 }
 
-/* ── EventEmbed ──────────────────────────────────────── */
+/* --- EventEmbed--- */
 
 static void test_event_embed(void) {
     printf("[event_embed_fwd]\n");
@@ -243,7 +243,7 @@ static void test_event_embed(void) {
     event_embed_del(e);
 }
 
-/* ── Shape / integration tests ───────────────────────── */
+/* --- Shape / integration tests--- */
 
 static void test_attn_shape(void) {
     printf("[attn_fwd shape]\n");
@@ -396,7 +396,7 @@ static void test_attn_bwd_finite_diff(void) {
     mat_del(&dao); mat_del(&dx); mat_del(&dkv);
 }
 
-/* ── Causal: no future peeking ───────────────────────── */
+/* --- Causal: no future peeking--- */
 /*
  * Verify that with causal=1, changing position 2 does NOT affect
  * the hidden state at position 0. With causal=0 it does (information leak).
@@ -598,6 +598,144 @@ static void test_load_bad_magic(void) {
     remove(path);
 }
 
+static int write_test_model_file(const char *path, int V, int T, int D, int H, int F, int L, int include_weights) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    int ver = 1;
+    float eps = 1e-5f;
+    fwrite("MYLM", 1, 4, f);
+    fwrite(&ver, sizeof(int), 1, f);
+    fwrite(&V, sizeof(int), 1, f);
+    fwrite(&T, sizeof(int), 1, f);
+    fwrite(&D, sizeof(int), 1, f);
+    fwrite(&H, sizeof(int), 1, f);
+    fwrite(&F, sizeof(int), 1, f);
+    fwrite(&L, sizeof(int), 1, f);
+    fwrite(&eps, sizeof(float), 1, f);
+    (void)include_weights;
+    fclose(f);
+    return 0;
+}
+
+static void test_model_load_bounds(void) {
+    printf("[model_load bounds/overflow]\n");
+    const char *path = "test_bounds.bin";
+
+    /* test: V exceeds MAX_V (100000) */
+    write_test_model_file(path, 200000, 8, 8, 2, 16, 1, 0);
+    check("model_load rejects V>MAX_V", model_load(path) == NULL);
+
+    /* test: D exceeds MAX_D (2048) */
+    write_test_model_file(path, 1000, 8, 3000, 2, 16, 1, 0);
+    check("model_load rejects D>MAX_D", model_load(path) == NULL);
+
+    /* test: L exceeds MAX_L (64) */
+    write_test_model_file(path, 1000, 8, 64, 2, 128, 100, 0);
+    check("model_load rejects L>MAX_L", model_load(path) == NULL);
+
+    /* test: total params exceed MAX_PARAMS (500M) - large L with moderate D */
+    write_test_model_file(path, 50000, 1024, 1024, 8, 4096, 60, 0);
+    check("model_load rejects total>MAX_PARAMS", model_load(path) == NULL);
+
+    /* test: negative V */
+    write_test_model_file(path, -1, 8, 8, 2, 16, 1, 0);
+    check("model_load rejects negative V", model_load(path) == NULL);
+
+    /* test: truncated file (missing weights) - valid header but no data */
+    write_test_model_file(path, 8, 4, 8, 2, 16, 1, 0);
+    check("model_load rejects truncated file", model_load(path) == NULL);
+
+    remove(path);
+}
+
+/* ---- input validation tests for model_fwd / model_encode etc. ---- */
+static void test_model_fwd_validation(void) {
+    printf("[model_fwd input validation]\n");
+    Cfg cfg = {.V=8,.T=4,.D=8,.H=2,.F=16,.L=1,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+
+    EC *ec[1]; ec[0] = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    DC *dc[1]; dc[0] = dc_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    Mat enc_out = mat_new(cfg.T, cfg.D);
+    Mat dec_out = mat_new(cfg.T, cfg.D);
+    Mat logits  = mat_new(cfg.T, cfg.V);
+
+    int src_ok[2] = {1, 2};
+    int tgt_ok[2] = {0, 1};
+    int lbl_ok[2] = {1, 2};
+
+    /* valid input */
+    check("model_fwd valid returns 0", model_fwd(m, src_ok, 2, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == 0);
+
+    /* SL out of range */
+    check("model_fwd SL=0 returns -1", model_fwd(m, src_ok, 0, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);
+    check("model_fwd SL>T returns -1", model_fwd(m, src_ok, cfg.T+1, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);
+
+    /* TL out of range */
+    check("model_fwd TL=0 returns -1", model_fwd(m, src_ok, 2, tgt_ok, 0, ec, dc, &enc_out, &dec_out, &logits) == -1);
+    check("model_fwd TL>T returns -1", model_fwd(m, src_ok, 2, tgt_ok, cfg.T+1, ec, dc, &enc_out, &dec_out, &logits) == -1);
+
+    /* src token out of range */
+    int src_bad[2] = {1, cfg.V};
+    check("model_fwd src>=V returns -1", model_fwd(m, src_bad, 2, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);
+    int src_neg[2] = {-1, 2};
+    check("model_fwd src<0 returns -1", model_fwd(m, src_neg, 2, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);
+
+    /* tgt token out of range */
+    int tgt_bad[2] = {0, cfg.V};
+    check("model_fwd tgt>=V returns -1", model_fwd(m, src_ok, 2, tgt_bad, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);
+
+    /* model_loss_bwd tests - need valid forward pass first */
+    model_fwd(m, src_ok, 2, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits);  /* setup valid state */
+    check("model_loss_bwd valid returns >=0", model_loss_bwd(m, src_ok, 2, tgt_ok, 2, lbl_ok, ec, dc, &enc_out, &dec_out, &logits) >= 0.f);
+    check("model_loss_bwd SL=0 returns -1", model_loss_bwd(m, src_ok, 0, tgt_ok, 2, lbl_ok, ec, dc, &enc_out, &dec_out, &logits) < 0.f);
+    int lbl_bad[2] = {1, cfg.V};
+    check("model_loss_bwd lbl>=V returns -1", model_loss_bwd(m, src_ok, 2, tgt_ok, 2, lbl_bad, ec, dc, &enc_out, &dec_out, &logits) < 0.f);
+
+    mat_del(&enc_out); mat_del(&dec_out); mat_del(&logits);
+    ec_del(ec[0]); dc_del(dc[0]);
+    model_del(m);
+}
+
+static void test_model_encode_validation(void) {
+    printf("[model_encode input validation]\n");
+    Cfg cfg = {.V=8,.T=4,.D=8,.H=2,.F=16,.L=1,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    EC *ec[1]; ec[0] = ec_new(cfg.T, cfg.D, cfg.F, cfg.H);
+    Mat enc_out = mat_new(cfg.T, cfg.D);
+
+    int src_ok[2] = {1, 2};
+    check("model_encode valid returns 0", model_encode(m, src_ok, 2, ec, &enc_out) == 0);
+    check("model_encode SL=0 returns -1", model_encode(m, src_ok, 0, ec, &enc_out) == -1);
+    check("model_encode SL>T returns -1", model_encode(m, src_ok, cfg.T+1, ec, &enc_out) == -1);
+    int src_bad[2] = {1, cfg.V};
+    check("model_encode src>=V returns -1", model_encode(m, src_bad, 2, ec, &enc_out) == -1);
+
+    mat_del(&enc_out);
+    ec_del(ec[0]);
+    model_del(m);
+}
+
+static void test_decode_cache_precompute_validation(void) {
+    printf("[decode_cache_precompute_cross validation]\n");
+    Cfg cfg = {.V=8,.T=4,.D=8,.H=2,.F=16,.L=1,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    DecodeCache *dkv = decode_cache_new(&cfg);
+
+    Mat enc_ok = mat_new(2, cfg.D);  /* SL=2, within T=4 */
+    check("precompute valid returns 0", decode_cache_precompute_cross(dkv, m, &enc_ok) == 0);
+
+    Mat enc_too_long = mat_new(cfg.T+1, cfg.D);  /* SL > max_len */
+    check("precompute SL>max_len returns -1", decode_cache_precompute_cross(dkv, m, &enc_too_long) == -1);
+
+    mat_del(&enc_ok); mat_del(&enc_too_long);
+    decode_cache_del(dkv);
+    model_del(m);
+}
+
 int main(void) {
     srand(0);
     printf("=== MyLLM unit tests ===\n\n");
@@ -621,6 +759,10 @@ int main(void) {
     test_model_serialize();
     test_event_serialize();
     test_load_bad_magic();
+    test_model_load_bounds();
+    test_model_fwd_validation();
+    test_model_encode_validation();
+    test_decode_cache_precompute_validation();
     printf("\n%d passed, %d failed\n", n_pass, n_fail);
     return n_fail > 0 ? 1 : 0;
 }

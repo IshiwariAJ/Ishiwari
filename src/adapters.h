@@ -1,4 +1,4 @@
-#ifndef ADAPTERS_H
+﻿#ifndef ADAPTERS_H
 #define ADAPTERS_H
 
 /*
@@ -12,7 +12,7 @@
 
 #include "event.h"
 
-/* ── ScalarBinAdapter ────────────────────────────────── */
+/* --- ScalarBinAdapter--- */
 /*
  * Discretizes a continuous scalar value in [0, 1] into one of n_bins bins
  * and appends it to an EventSeq as a scalar event.
@@ -48,7 +48,7 @@ int   sba_owns(const ScalarBinAdapter *a, int token_id);
 /* Return the event-vocabulary label for a raw float value. */
 int   sba_label(const ScalarBinAdapter *a, float val);
 
-/* ── TextAdapter ─────────────────────────────────────── */
+/* --- TextAdapter--- */
 /*
  * Appends text token ids to EventSeq with bounds and vocab validation.
  * token ids are expected in [0, vocab_size).
@@ -69,7 +69,7 @@ int ta_encode(const TextAdapter *a, EventSeq *s,
  */
 int ta_owns(const TextAdapter *a, int token_id);
 
-/* ── Output adapter: EventHead logits -> EventSeq ────── */
+/* --- Output adapter: EventHead logits -> EventSeq--- */
 /*
  * Restore an EventSeq from EventHead logits (n x V).
  * For each position, picks argmax and uses TextAdapter / ScalarBinAdapters

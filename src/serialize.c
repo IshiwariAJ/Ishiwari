@@ -1,7 +1,21 @@
-#include "model.h"
+﻿#include "model.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+/*
+ * Upper bounds for config values to prevent huge allocations.
+ * These are conservative limits for a small experimental project.
+ * Total parameter count is also checked to prevent large L bypassing individual limits.
+ */
+#define MAX_V 100000    /* max vocab size: 100K */
+#define MAX_T 4096      /* max seq len: 4K */
+#define MAX_D 2048      /* max d_model: 2K */
+#define MAX_H 64        /* max heads */
+#define MAX_F 8192      /* max d_ff: 8K */
+#define MAX_L 64        /* max layers */
+#define MAX_PARAMS ((int64_t)500 * 1000 * 1000)  /* max 500M parameters */
 
 /*
  * Binary model serialization.
@@ -20,7 +34,7 @@
 #define MODEL_MAGIC   "MYLM"
 #define MODEL_VERSION 1
 
-/* ── low-level helpers ───────────────────────────────── */
+/* --- low-level helpers--- */
 
 static int wr(const void *p, size_t sz, size_t n, FILE *f) {
     return fwrite(p, sz, n, f) == n;
@@ -67,7 +81,7 @@ static int load_dl(FILE *f, DL *d) {
         && load_ln(f,&d->ln1)&&load_ln(f,&d->ln2)&&load_ln(f,&d->ln3);
 }
 
-/* ── public API ──────────────────────────────────────── */
+/* --- public API--- */
 
 int model_save(const Model *m, const char *path) {
     FILE *f = fopen(path, "wb");
@@ -114,6 +128,29 @@ Model *model_load(const char *path) {
     /* basic sanity on shapes */
     if (c.V<=0 || c.T<=0 || c.D<=0 || c.H<=0 || c.F<=0 || c.L<=0 || c.D % c.H != 0) {
         fclose(f); return NULL;
+    }
+    /* upper bounds to prevent huge allocations */
+    if (c.V>MAX_V || c.T>MAX_T || c.D>MAX_D || c.H>MAX_H || c.F>MAX_F || c.L>MAX_L) {
+        fclose(f); return NULL;
+    }
+    /* total parameter count check:
+     * embeddings: 2 * V * D (src + tgt)
+     * per encoder layer: 4*D*D (sa) + 4*D (sa bias) + D*F + F + F*D + D (ffn) + 4*D (ln)
+     *                  ~ 4*D*D + 2*D*F + 8*D
+     * per decoder layer: 8*D*D (sa + ca) + 8*D (biases) + 2*D*F + 2*D (ffn) + 6*D (ln)
+     *                  ~ 8*D*D + 2*D*F + 16*D
+     * output projection: D*V + V
+     * simplified: params ~ 2*V*D + L*(12*D*D + 4*D*F) + D*V
+     */
+    {
+        int64_t D = c.D, F = c.F, V = c.V, L = c.L;
+        int64_t emb_params = 2 * V * D;
+        int64_t layer_params = L * (12 * D * D + 4 * D * F + 24 * D);
+        int64_t proj_params = D * V + V;
+        int64_t total = emb_params + layer_params + proj_params;
+        if (total > MAX_PARAMS) {
+            fclose(f); return NULL;
+        }
     }
 
     Model *m = model_new(&c);   /* allocates correct shapes, regenerates pos */

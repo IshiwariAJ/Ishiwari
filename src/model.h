@@ -1,8 +1,8 @@
-#ifndef MODEL_H
+﻿#ifndef MODEL_H
 #define MODEL_H
 #include "matrix.h"
 
-/* ── Config ─────────────────────────────────────────── */
+/* --- Config--- */
 typedef struct {
     int V;      /* vocab size */
     int T;      /* max seq len */
@@ -13,31 +13,31 @@ typedef struct {
     float eps;  /* layer-norm epsilon */
 } Cfg;
 
-/* ── Trainable parameter ────────────────────────────── */
+/* --- Trainable parameter--- */
 typedef struct { float *w, *g, *m, *v; int n; } P;
 P    p_new(int n);
 void p_del(P *p);
 void p_zg(P *p);
 
-/* ── Layer-norm: scale (γ) + shift (β) ─────────────── */
+/* --- Layer-norm: scale (γ) + shift (β)--- */
 typedef struct { P scale, shift; } LN;
 LN   ln_new(int d);
 void ln_del(LN *ln);
 void ln_zg(LN *ln);
 
-/* ── Attention weight block ─────────────────────────── */
+/* --- Attention weight block--- */
 typedef struct { P Wq,Wk,Wv,Wo, bq,bk,bv,bo; } AW;
 AW   aw_new(int D);
 void aw_del(AW *a);
 void aw_zg(AW *a);
 
-/* ── FFN weight block ───────────────────────────────── */
+/* --- FFN weight block--- */
 typedef struct { P W1,b1,W2,b2; } FW;
 FW   fw_new(int D, int F);
 void fw_del(FW *f);
 void fw_zg(FW *f);
 
-/* ── Encoder / Decoder layers ───────────────────────── */
+/* --- Encoder / Decoder layers--- */
 typedef struct { AW sa;      FW ff; LN ln1,ln2;     } EL;
 typedef struct { AW sa,ca;   FW ff; LN ln1,ln2,ln3; } DL;
 
@@ -48,7 +48,7 @@ void dl_del(DL *d);
 void el_zg(EL *e);
 void dl_zg(DL *d);
 
-/* ── Model ──────────────────────────────────────────── */
+/* --- Model--- */
 typedef struct {
     Cfg c;
     P   se, te;   /* src/tgt embeddings (V×D) */
@@ -64,7 +64,7 @@ void   model_del(Model *m);
 void   model_zg (Model *m);
 void   model_init(Model *m);
 
-/* ── Attention cache ────────────────────────────────── */
+/* --- Attention cache--- */
 typedef struct {
     Mat Q, K, V;          /* (T×D) projections */
     float *hs, *ha;       /* head scores / attn weights: [H×T×T] */
@@ -74,7 +74,7 @@ typedef struct {
     int S, KS;            /* actual seq lengths used this forward */
 } AC;
 
-/* ── Encoder layer cache ────────────────────────────── */
+/* --- Encoder layer cache--- */
 typedef struct {
     Mat xi;               /* layer input */
     AC  sa;               /* self-attention */
@@ -88,7 +88,7 @@ typedef struct {
     float *mn2, *vr2;
 } EC;
 
-/* ── Decoder layer cache ────────────────────────────── */
+/* --- Decoder layer cache--- */
 typedef struct {
     Mat xi;
     AC  sa;               /* masked self-attention */
@@ -109,7 +109,7 @@ void ac_del(AC *a);
 void ec_del(EC *e);
 void dc_del(DC *d);
 
-/* ── Layer-norm fwd/bwd ─────────────────────────────── */
+/* --- Layer-norm fwd/bwd--- */
 void ln_fwd(const Mat *x, const LN *w, Mat *y,
             float *mean, float *var, float eps);
 /* dx +=, dw accumulated */
@@ -117,7 +117,7 @@ void ln_bwd(const Mat *x, const LN *w,
             const float *mean, const float *var,
             const Mat *dy, Mat *dx, LN *dw, float eps);
 
-/* ── Attention fwd/bwd ──────────────────────────────── */
+/* --- Attention fwd/bwd--- */
 /* kv == x for self-attention */
 void attn_fwd(const Mat *x, const Mat *kv,
               const AW *w, int H, int causal, AC *c);
@@ -125,13 +125,13 @@ void attn_fwd(const Mat *x, const Mat *kv,
 void attn_bwd(const AW *w, int H, int causal, AC *c,
               const Mat *dao, Mat *dx, Mat *dkv, AW *dw);
 
-/* ── FFN fwd/bwd ────────────────────────────────────── */
+/* --- FFN fwd/bwd--- */
 void ffn_fwd(const Mat *x, const FW *w, Mat *h, Mat *out);
 /* dx accumulated */
 void ffn_bwd(const Mat *x, const FW *w, const Mat *h,
              const Mat *dout, Mat *dx, FW *dw);
 
-/* ── Encoder/Decoder layer fwd/bwd ─────────────────── */
+/* --- Encoder/Decoder layer fwd/bwd--- */
 /* causal=0 for bidirectional encoder, causal=1 for causal LM */
 void el_fwd(const Mat *x, const EL *w, EC *c, const Cfg *cfg, int causal);
 void dl_fwd(const Mat *x, const Mat *enc, const DL *w, DC *c, const Cfg *cfg);
@@ -141,13 +141,15 @@ void el_bwd(const EL *w, EC *c, const Cfg *cfg,
 void dl_bwd(const DL *w, DC *c, const Cfg *cfg,
             const Mat *dy, DL *dw, Mat *dx, Mat *d_enc);
 
-/* ── Full model ─────────────────────────────────────── */
-void  model_fwd(Model *m,
+/* --- Full model--- */
+/* Returns 0 on success, -1 on invalid input (SL/TL out of range, bad token id). */
+int   model_fwd(Model *m,
                 const int *src, int SL,
                 const int *tgt, int TL,
                 EC **ec, DC **dc,
                 Mat *enc_out, Mat *dec_out, Mat *logits);
 
+/* Returns loss on success, -1.0f on invalid input. */
 float model_loss_bwd(Model *m,
                      const int *src, int SL,
                      const int *tgt, int TL,
@@ -156,11 +158,11 @@ float model_loss_bwd(Model *m,
                      const Mat *enc_out, const Mat *dec_out,
                      const Mat *logits);
 
-/* ── Adam optimizer ─────────────────────────────────── */
+/* --- Adam optimizer--- */
 typedef struct { float lr,b1,b2,eps; int step; } Opt;
 void opt_step(Model *m, Opt *o);
 
-/* ── KV cache (inference only) ──────────────────────── */
+/* --- KV cache (inference only)--- */
 typedef struct { Mat K, V; int len; } KV;
 typedef struct { KV self, cross; } DLayerKV;
 typedef struct { DLayerKV *layers; int max_len, L; } DecodeCache;
@@ -169,13 +171,15 @@ DecodeCache *decode_cache_new(const Cfg *cfg);
 void         decode_cache_del(DecodeCache *c);
 void         decode_cache_reset(DecodeCache *c);
 
-void model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out);
-void decode_cache_precompute_cross(DecodeCache *c, Model *m, const Mat *enc_out);
+/* Returns 0 on success, -1 on invalid input. */
+int  model_encode(Model *m, const int *src, int SL, EC **ec, Mat *enc_out);
+/* Returns 0 on success, -1 if enc_out rows exceed cache max_len. */
+int  decode_cache_precompute_cross(DecodeCache *c, Model *m, const Mat *enc_out);
 /* Returns 0 on success, -1 on invalid args or cache overflow. */
 int  model_decode_step(Model *m, int token, int pos,
                        DecodeCache *kv, Mat *logits_1xV);
 
-/* ── Serialization ──────────────────────────────────── */
+/* --- Serialization--- */
 /* Save/load all learnable weights. Format carries a version + Cfg header,
  * so model_load reconstructs the model with matching shapes.
  * model_save: 0 on success, -1 on failure.
