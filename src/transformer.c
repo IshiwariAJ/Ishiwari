@@ -10,10 +10,12 @@
  *   tgt[TL]  : target token ids (decoder input, teacher forcing)
  *   ec[L]    : encoder caches  (one per layer)
  *   dc[L]    : decoder caches  (one per layer)
- *   enc_out  : (SL × D)  final encoder output
- *   dec_out  : (TL × D)  final decoder output
- *   logits   : (TL × V)  pre-softmax output
+ *   enc_out  : (SL x D)  final encoder output
+ *   dec_out  : (TL x D)  final decoder output
+ *   logits   : (TL x V)  pre-softmax output
  * Returns 0 on success, -1 on invalid input.
+ *
+ * Shape contract: output Mat r/c are set to actual size BEFORE downstream use.
  */
 int model_fwd(Model *m,
                const int *src, int SL,
@@ -84,17 +86,19 @@ int model_fwd(Model *m,
         dec_cur.d = dc[l]->xo.d;
         dec_cur.r = TL; dec_cur.c = D;
     }
+    /* copy decoder output and set shape before projection uses it */
     memcpy(dec_out->d, dec_cur.d, (size_t)TL*D*sizeof(float));
+    dec_out->r = TL;
+    dec_out->c = D;
     mat_del(&dec_in);
 
-    /* -- Output projection: logits = dec_out @ proj + proj_b  (TL × V) */
+    /* output projection: logits = dec_out @ proj + proj_b  (TL x V) */
+    logits->r = TL;
+    logits->c = V;
     Mat proj = {m->proj.w, D, V};
     mm(dec_out, &proj, logits);
     add_bias(logits, m->proj_b.w);
 
-    /* update remaining output shapes */
-    dec_out->r = TL; dec_out->c = D;
-    logits->r  = TL; logits->c  = V;
     return 0;
 }
 
