@@ -161,6 +161,8 @@ float model_loss_bwd(Model *m,
 /* --- Adam optimizer--- */
 typedef struct { float lr,b1,b2,eps; int step; } Opt;
 void opt_step(Model *m, Opt *o);
+int  opt_state_save(const Model *m, const Opt *o, const char *path);
+int  opt_state_load(Model *m, Opt *o, const char *path);
 
 /* --- KV cache (inference only)--- */
 typedef struct { Mat K, V; int len; } KV;

@@ -182,4 +182,22 @@ int model_bundle_save(const ModelBundle *b, const char *path);
  * Validates component consistency after loading. */
 ModelBundle *model_bundle_load(const char *path);
 
+/* --- Checkpoint --- */
+/*
+ * Checkpoint groups:
+ *   - ModelBundle: model + EventEmbed + EventHead + AdapterSchema
+ *   - optimizer state: Adam moments and Opt values for bundle->model
+ *   - train_step: caller-level progress marker
+ *
+ * Given path "foo.ckpt" and train_step 10, checkpoint_save writes:
+ *   - foo.ckpt.step10.bundle
+ *   - foo.ckpt.step10.opt
+ *   - foo.ckpt        (manifest written last)
+ *
+ * checkpoint_load reads the manifest, then loads the derived bundle and
+ * optimizer state. Returns a new ModelBundle or NULL on error.
+ */
+int checkpoint_save(const ModelBundle *b, const Opt *o, int train_step, const char *path);
+ModelBundle *checkpoint_load(const char *path, Opt *o, int *train_step);
+
 #endif

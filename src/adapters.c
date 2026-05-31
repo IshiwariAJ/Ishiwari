@@ -1,4 +1,6 @@
 #include "adapters.h"
+#include "serialize_internal.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -517,19 +519,26 @@ static int replace_file_atomic(const char *src, const char *dst) {
 #endif
 }
 
-static int64_t stream_pos(FILE *f) {
+static int64_t file_pos(FILE *f) {
+#ifdef _WIN32
+    __int64 pos = _ftelli64(f);
+    if (pos < 0) return -1;
+    return (int64_t)pos;
+#else
     long pos = ftell(f);
     if (pos < 0) return -1;
     return (int64_t)pos;
+#endif
 }
 
-/* forward declarations for internal *_to_fp / *_from_fp helpers */
-int model_save_fp(const Model *m, FILE *f);
-Model *model_load_fp(FILE *f);
-int event_embed_save_fp(const EventEmbed *e, FILE *f);
-EventEmbed *event_embed_load_fp(FILE *f);
-int event_head_save_fp(const EventHead *h, FILE *f);
-EventHead *event_head_load_fp(FILE *f);
+static int file_seek(FILE *f, int64_t offset, int origin) {
+#ifdef _WIN32
+    return _fseeki64(f, offset, origin);
+#else
+    if (offset > LONG_MAX || offset < LONG_MIN) return -1;
+    return fseek(f, (long)offset, origin);
+#endif
+}
 
 int model_bundle_save(const ModelBundle *b, const char *path) {
     if (!path) return -1;
@@ -547,7 +556,7 @@ int model_bundle_save(const ModelBundle *b, const char *path) {
     int ok = 1;
     ok &= (fwrite(BUNDLE_MAGIC, 1, 4, f) == 4);
     ok &= (fwrite(&ver, sizeof(int), 1, f) == 1);
-    int64_t size_offset = stream_pos(f);  /* remember position of size fields */
+    int64_t size_offset = file_pos(f);  /* remember position of size fields */
     ok &= (fwrite(&zero, sizeof(int64_t), 1, f) == 1);  /* model_size */
     ok &= (fwrite(&zero, sizeof(int64_t), 1, f) == 1);  /* embed_size */
     ok &= (fwrite(&zero, sizeof(int64_t), 1, f) == 1);  /* head_size */
@@ -555,21 +564,21 @@ int model_bundle_save(const ModelBundle *b, const char *path) {
     if (!ok || size_offset < 0) { fclose(f); remove(tmp_bundle); return -1; }
 
     /* write components directly, tracking positions */
-    int64_t pos_model_start = stream_pos(f);
+    int64_t pos_model_start = file_pos(f);
     ok &= (model_save_fp(b->model, f) == 0);
-    int64_t pos_model_end = stream_pos(f);
+    int64_t pos_model_end = file_pos(f);
 
     int64_t pos_embed_start = pos_model_end;
     ok &= (event_embed_save_fp(b->embed, f) == 0);
-    int64_t pos_embed_end = stream_pos(f);
+    int64_t pos_embed_end = file_pos(f);
 
     int64_t pos_head_start = pos_embed_end;
     ok &= (event_head_save_fp(b->head, f) == 0);
-    int64_t pos_head_end = stream_pos(f);
+    int64_t pos_head_end = file_pos(f);
 
     int64_t pos_schema_start = pos_head_end;
     ok &= (adapter_schema_save_to_fp(b->schema, f) == 0);
-    int64_t pos_schema_end = stream_pos(f);
+    int64_t pos_schema_end = file_pos(f);
 
     if (!ok || pos_model_start < 0 || pos_model_end < 0 ||
         pos_embed_end < 0 || pos_head_end < 0 || pos_schema_end < 0) {
@@ -588,7 +597,7 @@ int model_bundle_save(const ModelBundle *b, const char *path) {
     }
 
     /* seek back and write actual sizes */
-    if (fseek(f, size_offset, SEEK_SET) != 0) { fclose(f); remove(tmp_bundle); return -1; }
+    if (file_seek(f, size_offset, SEEK_SET) != 0) { fclose(f); remove(tmp_bundle); return -1; }
     ok &= (fwrite(&sz_model, sizeof(int64_t), 1, f) == 1);
     ok &= (fwrite(&sz_embed, sizeof(int64_t), 1, f) == 1);
     ok &= (fwrite(&sz_head, sizeof(int64_t), 1, f) == 1);
@@ -610,11 +619,10 @@ ModelBundle *model_bundle_load(const char *path) {
     if (!f) return NULL;
 
     /* get file size for consistency check */
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long pos = ftell(f);
-    if (pos < 0) { fclose(f); return NULL; }
-    int64_t file_sz = (int64_t)pos;
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    if (file_seek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    int64_t file_sz = file_pos(f);
+    if (file_sz < 0) { fclose(f); return NULL; }
+    if (file_seek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
 
     char magic[4];
     int ver;
@@ -639,18 +647,18 @@ ModelBundle *model_bundle_load(const char *path) {
     }
 
     /* load components directly and verify each consumes its declared byte count. */
-    int64_t before = stream_pos(f);
+    int64_t before = file_pos(f);
     Model *m = model_load_fp(f);
-    int64_t after = stream_pos(f);
+    int64_t after = file_pos(f);
     if (!m || before < 0 || after < 0 || after - before != sz_model) {
         if (m) model_del(m);
         fclose(f);
         return NULL;
     }
 
-    before = stream_pos(f);
+    before = file_pos(f);
     EventEmbed *e = event_embed_load_fp(f);
-    after = stream_pos(f);
+    after = file_pos(f);
     if (!e || before < 0 || after < 0 || after - before != sz_embed) {
         model_del(m);
         if (e) event_embed_del(e);
@@ -658,9 +666,9 @@ ModelBundle *model_bundle_load(const char *path) {
         return NULL;
     }
 
-    before = stream_pos(f);
+    before = file_pos(f);
     EventHead *h = event_head_load_fp(f);
-    after = stream_pos(f);
+    after = file_pos(f);
     if (!h || before < 0 || after < 0 || after - before != sz_head) {
         model_del(m);
         event_embed_del(e);
@@ -669,9 +677,9 @@ ModelBundle *model_bundle_load(const char *path) {
         return NULL;
     }
 
-    before = stream_pos(f);
+    before = file_pos(f);
     AdapterSchema *s = adapter_schema_load_from_fp(f);
-    after = stream_pos(f);
+    after = file_pos(f);
     if (!s || before < 0 || after < 0 || after - before != sz_schema) {
         model_del(m);
         event_embed_del(e);
@@ -691,5 +699,94 @@ ModelBundle *model_bundle_load(const char *path) {
         return NULL;
     }
 
+    return b;
+}
+
+/* --- Checkpoint --- */
+
+#define CHECKPOINT_MAGIC   "CKPT"
+#define CHECKPOINT_VERSION 1
+#define CHECKPOINT_PATH_SIZE 512
+
+static int checkpoint_derive_path(const char *path, const char *suffix,
+                                  char *out, size_t out_size) {
+    if (!path || !suffix || !out) return -1;
+    int n = snprintf(out, out_size, "%s%s", path, suffix);
+    if (n <= 0 || (size_t)n >= out_size) return -1;
+    return 0;
+}
+
+static int checkpoint_derive_step_path(const char *path, int train_step,
+                                       const char *suffix,
+                                       char *out, size_t out_size) {
+    if (!path || !suffix || !out || train_step < 0) return -1;
+    int n = snprintf(out, out_size, "%s.step%d%s", path, train_step, suffix);
+    if (n <= 0 || (size_t)n >= out_size) return -1;
+    return 0;
+}
+
+int checkpoint_save(const ModelBundle *b, const Opt *o, int train_step, const char *path) {
+    if (!b || !o || !path) return -1;
+    if (train_step < 0) return -1;
+    if (model_bundle_validate(b) != 0) return -1;
+
+    char bundle_path[CHECKPOINT_PATH_SIZE];
+    char opt_path[CHECKPOINT_PATH_SIZE];
+    char tmp_manifest[CHECKPOINT_PATH_SIZE];
+    if (checkpoint_derive_step_path(path, train_step, ".bundle", bundle_path, sizeof(bundle_path)) != 0) return -1;
+    if (checkpoint_derive_step_path(path, train_step, ".opt", opt_path, sizeof(opt_path)) != 0) return -1;
+    if (checkpoint_derive_path(path, ".tmp", tmp_manifest, sizeof(tmp_manifest)) != 0) return -1;
+
+    if (model_bundle_save(b, bundle_path) != 0) return -1;
+    if (opt_state_save(b->model, o, opt_path) != 0) return -1;
+
+    FILE *f = fopen(tmp_manifest, "wb");
+    if (!f) return -1;
+    int ver = CHECKPOINT_VERSION;
+    int ok = 1;
+    ok &= (fwrite(CHECKPOINT_MAGIC, 1, 4, f) == 4);
+    ok &= (fwrite(&ver, sizeof(int), 1, f) == 1);
+    ok &= (fwrite(&train_step, sizeof(int), 1, f) == 1);
+    fclose(f);
+    if (!ok) { remove(tmp_manifest); return -1; }
+
+    if (replace_file_atomic(tmp_manifest, path) != 0) {
+        remove(tmp_manifest);
+        return -1;
+    }
+    return 0;
+}
+
+ModelBundle *checkpoint_load(const char *path, Opt *o, int *train_step) {
+    if (!path || !o) return NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    char magic[4];
+    int ver;
+    int step;
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, CHECKPOINT_MAGIC, 4) != 0 ||
+        fread(&ver, sizeof(int), 1, f) != 1 || ver != CHECKPOINT_VERSION ||
+        fread(&step, sizeof(int), 1, f) != 1) {
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    char bundle_path[CHECKPOINT_PATH_SIZE];
+    char opt_path[CHECKPOINT_PATH_SIZE];
+    if (checkpoint_derive_step_path(path, step, ".bundle", bundle_path, sizeof(bundle_path)) != 0) return NULL;
+    if (checkpoint_derive_step_path(path, step, ".opt", opt_path, sizeof(opt_path)) != 0) return NULL;
+
+    ModelBundle *b = model_bundle_load(bundle_path);
+    if (!b) return NULL;
+
+    if (opt_state_load(b->model, o, opt_path) != 0) {
+        model_bundle_del(b);
+        return NULL;
+    }
+
+    if (train_step) *train_step = step;
     return b;
 }

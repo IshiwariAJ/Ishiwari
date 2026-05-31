@@ -649,6 +649,80 @@ static void test_model_load_bounds(void) {
     remove(path);
 }
 
+static void test_optimizer_state_serialize(void) {
+    printf("[optimizer state save/load]\n");
+    const char *path = "test_opt_state.bin";
+    const char *bad_path = "test_bad_opt_state.bin";
+    Cfg cfg = {.V=8,.T=4,.D=8,.H=2,.F=16,.L=1,.eps=1e-5f};
+
+    Model *m = model_new(&cfg);
+    Model *m2 = model_new(&cfg);
+    Opt opt = {.lr=0.001f,.b1=0.9f,.b2=0.999f,.eps=1e-8f,.step=42};
+    Opt loaded = {0};
+
+    m->se.m[0] = 0.125f;
+    m->se.v[0] = 0.25f;
+    m->enc[0].sa.Wq.m[0] = -0.5f;
+    m->dec[0].ca.Wv.v[0] = 0.75f;
+    m->proj_b.m[1] = 1.25f;
+
+    check("opt_state_save ok", opt_state_save(m, &opt, path) == 0);
+    check("opt_state_load ok", opt_state_load(m2, &loaded, path) == 0);
+    check("opt lr preserved", fclose_to(loaded.lr, opt.lr, 1e-9f));
+    check("opt step preserved", loaded.step == opt.step);
+    check("se.m restored", fclose_to(m2->se.m[0], 0.125f, 1e-7f));
+    check("se.v restored", fclose_to(m2->se.v[0], 0.25f, 1e-7f));
+    check("enc Wq.m restored", fclose_to(m2->enc[0].sa.Wq.m[0], -0.5f, 1e-7f));
+    check("dec ca.Wv.v restored", fclose_to(m2->dec[0].ca.Wv.v[0], 0.75f, 1e-7f));
+    check("proj_b.m restored", fclose_to(m2->proj_b.m[1], 1.25f, 1e-7f));
+
+    Cfg bad_cfg = cfg;
+    bad_cfg.D = 16;
+    bad_cfg.H = 4;
+    Model *bad_model = model_new(&bad_cfg);
+    check("opt_state_load cfg mismatch returns -1",
+          opt_state_load(bad_model, &loaded, path) == -1);
+    model_del(bad_model);
+
+    {
+        FILE *f = fopen(bad_path, "wb");
+        int ver = 1;
+        fwrite("OPTS", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&cfg.V, sizeof(int), 1, f);
+        fwrite(&cfg.T, sizeof(int), 1, f);
+        fwrite(&cfg.D, sizeof(int), 1, f);
+        fwrite(&cfg.H, sizeof(int), 1, f);
+        fwrite(&cfg.F, sizeof(int), 1, f);
+        fwrite(&cfg.L, sizeof(int), 1, f);
+        fwrite(&cfg.eps, sizeof(float), 1, f);
+        fwrite(&opt.lr, sizeof(float), 1, f);
+        fwrite(&opt.b1, sizeof(float), 1, f);
+        fwrite(&opt.b2, sizeof(float), 1, f);
+        fwrite(&opt.eps, sizeof(float), 1, f);
+        fwrite(&opt.step, sizeof(int), 1, f);
+        fclose(f);
+    }
+    m2->se.m[0] = 9.f;
+    check("opt_state_load truncated returns -1",
+          opt_state_load(m2, &loaded, bad_path) == -1);
+    check("truncated opt_state does not clobber moments",
+          fclose_to(m2->se.m[0], 9.f, 1e-7f));
+
+    {
+        FILE *f = fopen(bad_path, "wb");
+        fwrite("BAD!", 1, 4, f);
+        fclose(f);
+    }
+    check("opt_state_load bad magic returns -1",
+          opt_state_load(m2, &loaded, bad_path) == -1);
+
+    model_del(m);
+    model_del(m2);
+    remove(path);
+    remove(bad_path);
+}
+
 /* ---- input validation tests for model_fwd / model_encode etc. ---- */
 static void test_model_fwd_validation(void) {
     printf("[model_fwd input validation]\n");
@@ -875,6 +949,11 @@ static void test_model_bundle(void) {
 
     EventHead *eh = event_head_new(cfg.D, 124);
     event_head_init(eh);
+    memset(eh->proj.w, 0, sizeof(float) * eh->proj.n);
+    memset(eh->proj_b.w, 0, sizeof(float) * eh->proj_b.n);
+    eh->proj.w[0 * eh->V + 1] = 5.f;    /* hidden dim 0 -> text token 1 */
+    eh->proj.w[1 * eh->V + 103] = 5.f;  /* hidden dim 1 -> temp bin 3 */
+    eh->proj.w[2 * eh->V + 2] = 5.f;    /* hidden dim 2 -> EOS */
 
     AdapterSchema *sc = adapter_schema_new();
     adapter_schema_add_text(sc, 100);                     /* text: 0-99 */
@@ -930,6 +1009,31 @@ static void test_model_bundle(void) {
     check("temp adapter n_bins == 8", sba_temp.n_bins == 8);
     float decoded = sba_decode(&sba_temp, 103);  /* bin 3 of 8 -> 3/7 */
     check("temp sba_decode(103) == 3/7", fclose_to(decoded, 3.f/7.f, 1e-6f));
+
+    /* verify loaded schema can interpret loaded EventHead logits */
+    TextAdapter ta_loaded = adapter_schema_get_text(b2->schema, 0);
+    ScalarBinAdapter sba_loaded[2];
+    sba_loaded[0] = adapter_schema_get_scalar(b2->schema, 1);
+    sba_loaded[1] = adapter_schema_get_scalar(b2->schema, 2);
+    Mat hidden = mat_new(3, cfg.D);
+    Mat logits = mat_new(3, b2->head->V);
+    hidden.d[0 * cfg.D + 0] = 1.f;
+    hidden.d[1 * cfg.D + 1] = 1.f;
+    hidden.d[2 * cfg.D + 2] = 1.f;
+    event_head_fwd(b2->head, &hidden, &logits);
+    EventSeq *out = event_seq_new(4);
+    int decoded_n = event_head_to_seq(&logits, &ta_loaded, sba_loaded, 2, out, 2);
+    check("loaded head/schema decoded 3 events", decoded_n == 3);
+    check("loaded decoded pos0 text token 1",
+          out->n == 3 && out->modality[0] == MOD_TEXT && out->token_id[0] == 1);
+    check("loaded decoded pos1 temp",
+          out->n == 3 && out->modality[1] == MOD_TEMPERATURE &&
+          fclose_to(out->value[1], 3.f/7.f, 1e-6f));
+    check("loaded decoded pos2 EOS",
+          out->n == 3 && out->modality[2] == MOD_TEXT && out->token_id[2] == 2);
+    event_seq_del(out);
+    mat_del(&hidden);
+    mat_del(&logits);
 
     model_bundle_del(b2);
     remove(path);
@@ -1111,6 +1215,63 @@ static void test_model_bundle_null_safety(void) {
     check("model_bundle_del(NULL) no crash", 1);
 }
 
+static void test_model_bundle_save_failure_preserves_existing(void) {
+    printf("[model_bundle save failure preserves existing]\n");
+    const char *path = "test_bundle_preserve.bin";
+
+    check("create baseline bundle", create_test_bundle_file(path) == 0);
+    ModelBundle *baseline = model_bundle_load(path);
+    check("baseline bundle loadable", baseline != NULL);
+    float baseline_weight = baseline ? baseline->model->se.w[0] : 0.f;
+    int baseline_vocab = baseline ? baseline->schema->total_vocab : -1;
+    if (baseline) model_bundle_del(baseline);
+
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    EventEmbed *ee = event_embed_new(64, 124, cfg.T);  /* invalid: D mismatch */
+    event_embed_init(ee);
+    EventHead *eh = event_head_new(cfg.D, 124);
+    event_head_init(eh);
+    AdapterSchema *sc = adapter_schema_new();
+    adapter_schema_add_text(sc, 100);
+    adapter_schema_add_scalar(sc, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);
+    adapter_schema_add_scalar(sc, MOD_TIME, 0, 16, 0.f, 1.f);
+
+    ModelBundle *invalid = model_bundle_new(m, ee, eh, sc);
+    check("invalid bundle save returns -1", model_bundle_save(invalid, path) == -1);
+    model_bundle_del(invalid);
+
+    ModelBundle *after = model_bundle_load(path);
+    check("existing bundle still loadable", after != NULL);
+    check("existing model weight preserved",
+          after && fclose_to(after->model->se.w[0], baseline_weight, 1e-7f));
+    check("existing schema preserved",
+          after && after->schema->total_vocab == baseline_vocab);
+    model_bundle_del(after);
+    remove(path);
+}
+
+static void test_model_bundle_replace_failure(void) {
+    printf("[model_bundle replace failure]\n");
+
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    EventEmbed *ee = event_embed_new(cfg.D, 124, cfg.T);
+    event_embed_init(ee);
+    EventHead *eh = event_head_new(cfg.D, 124);
+    event_head_init(eh);
+    AdapterSchema *sc = adapter_schema_new();
+    adapter_schema_add_text(sc, 100);
+    adapter_schema_add_scalar(sc, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);
+    adapter_schema_add_scalar(sc, MOD_TIME, 0, 16, 0.f, 1.f);
+
+    ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+    check("save to directory path returns -1", model_bundle_save(b, ".") == -1);
+    model_bundle_del(b);
+}
+
 static void test_model_bundle_malformed(void) {
     printf("[model_bundle malformed file rejection]\n");
     const char *path = "test_bad_bundle.bin";
@@ -1200,7 +1361,141 @@ static void test_model_bundle_malformed(void) {
         check("load huge component size returns NULL", model_bundle_load(path) == NULL);
     }
 
+    /* max-size header without payload should be rejected by file size check */
+    {
+        FILE *f = fopen(path, "wb");
+        int ver = 1;
+        int64_t one_gb = ((int64_t)1 << 30);
+        int64_t one = 1;
+        fwrite("MBDL", 1, 4, f);
+        fwrite(&ver, sizeof(int), 1, f);
+        fwrite(&one_gb, sizeof(int64_t), 1, f);
+        fwrite(&one_gb, sizeof(int64_t), 1, f);
+        fwrite(&one_gb, sizeof(int64_t), 1, f);
+        fwrite(&one_gb, sizeof(int64_t), 1, f);
+        fwrite(&one, sizeof(int64_t), 1, f);
+        fclose(f);
+        check("load max-size header without data returns NULL", model_bundle_load(path) == NULL);
+    }
+
     remove(path);
+}
+
+static void test_checkpoint_roundtrip(void) {
+    printf("[checkpoint save/load]\n");
+    const char *path = "test_checkpoint.ckpt";
+    const char *bundle_path = "test_checkpoint.ckpt.step1234.bundle";
+    const char *opt_path = "test_checkpoint.ckpt.step1234.opt";
+
+    Cfg cfg = {.V=100,.T=16,.D=32,.H=4,.F=64,.L=2,.eps=1e-5f};
+    Model *m = model_new(&cfg);
+    model_init(m);
+    EventEmbed *ee = event_embed_new(cfg.D, 124, cfg.T);
+    event_embed_init(ee);
+    EventHead *eh = event_head_new(cfg.D, 124);
+    event_head_init(eh);
+    AdapterSchema *sc = adapter_schema_new();
+    adapter_schema_add_text(sc, 100);
+    adapter_schema_add_scalar(sc, MOD_TEMPERATURE, 0, 8, 0.f, 100.f);
+    adapter_schema_add_scalar(sc, MOD_TIME, 0, 16, 0.f, 1.f);
+
+    ModelBundle *b = model_bundle_new(m, ee, eh, sc);
+    Opt opt = {.lr=0.002f,.b1=0.8f,.b2=0.95f,.eps=1e-7f,.step=17};
+    b->model->se.m[0] = 0.33f;
+    b->model->se.v[0] = 0.44f;
+    b->model->proj_b.m[2] = -0.55f;
+    float se_w0 = b->model->se.w[0];
+    int train_step = 1234;
+
+    check("checkpoint_save ok", checkpoint_save(b, &opt, train_step, path) == 0);
+    model_bundle_del(b);
+
+    Opt loaded_opt = {0};
+    int loaded_step = 0;
+    ModelBundle *loaded = checkpoint_load(path, &loaded_opt, &loaded_step);
+    check("checkpoint_load non-null", loaded != NULL);
+    check("checkpoint train_step preserved", loaded_step == train_step);
+    check("checkpoint opt step preserved", loaded_opt.step == opt.step);
+    check("checkpoint opt lr preserved", fclose_to(loaded_opt.lr, opt.lr, 1e-9f));
+    check("checkpoint bundle model weight preserved",
+          loaded && fclose_to(loaded->model->se.w[0], se_w0, 1e-6f));
+    check("checkpoint optimizer se.m restored",
+          loaded && fclose_to(loaded->model->se.m[0], 0.33f, 1e-7f));
+    check("checkpoint optimizer se.v restored",
+          loaded && fclose_to(loaded->model->se.v[0], 0.44f, 1e-7f));
+    check("checkpoint optimizer proj_b.m restored",
+          loaded && fclose_to(loaded->model->proj_b.m[2], -0.55f, 1e-7f));
+    check("checkpoint schema restored",
+          loaded && loaded->schema->n == 3 && loaded->schema->total_vocab == 124);
+
+    if (loaded) {
+        float before_w = loaded->model->se.w[0];
+        int before_step = loaded_opt.step;
+        loaded->model->se.g[0] = 1.f;
+        opt_step(loaded->model, &loaded_opt);
+        check("checkpoint resumed opt_step increments step", loaded_opt.step == before_step + 1);
+        check("checkpoint resumed opt_step updates weight",
+              loaded->model->se.w[0] != before_w);
+    } else {
+        check("checkpoint resumed opt_step increments step", 0);
+        check("checkpoint resumed opt_step updates weight", 0);
+    }
+
+    if (loaded) {
+        Model *lm = loaded->model;
+        EC **ec = (EC**)calloc(lm->c.L, sizeof(EC*));
+        DC **dc = (DC**)calloc(lm->c.L, sizeof(DC*));
+        for (int i = 0; i < lm->c.L; i++) {
+            ec[i] = ec_new(lm->c.T, lm->c.D, lm->c.F, lm->c.H);
+            dc[i] = dc_new(lm->c.T, lm->c.D, lm->c.F, lm->c.H);
+        }
+        Mat enc_out = mat_new(lm->c.T, lm->c.D);
+        Mat dec_out = mat_new(lm->c.T, lm->c.D);
+        Mat logits = mat_new(lm->c.T, lm->c.V);
+        int src[3] = {1, 2, 3};
+        int tgt[3] = {0, 1, 2};
+        int lbl[3] = {1, 2, 3};
+        int before_step = loaded_opt.step;
+
+        model_zg(lm);
+        int fwd_ok = model_fwd(lm, src, 3, tgt, 3, ec, dc, &enc_out, &dec_out, &logits);
+        float loss = model_loss_bwd(lm, src, 3, tgt, 3, lbl, ec, dc, &enc_out, &dec_out, &logits);
+        opt_step(lm, &loaded_opt);
+        check("checkpoint resumed model_fwd ok", fwd_ok == 0);
+        check("checkpoint resumed loss_bwd ok", loss >= 0.f);
+        check("checkpoint resumed training step increments", loaded_opt.step == before_step + 1);
+
+        mat_del(&enc_out);
+        mat_del(&dec_out);
+        mat_del(&logits);
+        for (int i = 0; i < lm->c.L; i++) {
+            ec_del(ec[i]);
+            dc_del(dc[i]);
+        }
+        free(ec);
+        free(dc);
+    } else {
+        check("checkpoint resumed model_fwd ok", 0);
+        check("checkpoint resumed loss_bwd ok", 0);
+        check("checkpoint resumed training step increments", 0);
+    }
+    model_bundle_del(loaded);
+
+    remove(opt_path);
+    loaded = checkpoint_load(path, &loaded_opt, &loaded_step);
+    check("checkpoint_load missing opt returns NULL", loaded == NULL);
+
+    {
+        FILE *f = fopen(path, "wb");
+        fwrite("BAD!", 1, 4, f);
+        fclose(f);
+    }
+    check("checkpoint_load bad manifest returns NULL",
+          checkpoint_load(path, &loaded_opt, &loaded_step) == NULL);
+
+    remove(path);
+    remove(bundle_path);
+    remove(opt_path);
 }
 
 static void test_adapter_schema_malformed(void) {
@@ -1279,6 +1574,7 @@ int main(void) {
     test_event_serialize();
     test_load_bad_magic();
     test_model_load_bounds();
+    test_optimizer_state_serialize();
     test_model_fwd_validation();
     test_model_encode_validation();
     test_decode_cache_precompute_validation();
@@ -1289,7 +1585,10 @@ int main(void) {
     test_model_bundle_validation();
     test_model_bundle_component_boundaries();
     test_model_bundle_null_safety();
+    test_model_bundle_save_failure_preserves_existing();
+    test_model_bundle_replace_failure();
     test_model_bundle_malformed();
+    test_checkpoint_roundtrip();
     printf("\n%d passed, %d failed\n", n_pass, n_fail);
     return n_fail > 0 ? 1 : 0;
 }

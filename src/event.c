@@ -1,4 +1,5 @@
 #include "event.h"
+#include "serialize_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -390,4 +391,3 @@ int event_head_save_fp(const EventHead *h, FILE *f) {
 EventHead *event_head_load_fp(FILE *f) {
     return event_head_load_from_fp(f);
 }
-
