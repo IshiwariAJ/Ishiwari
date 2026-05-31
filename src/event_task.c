@@ -1,4 +1,4 @@
-﻿/*
+/*
  * EventEmbed end-to-end training demo.
  *
  * Full pipeline:

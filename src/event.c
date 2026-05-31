@@ -1,4 +1,4 @@
-﻿#include "event.h"
+#include "event.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

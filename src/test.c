@@ -1,4 +1,4 @@
-﻿#include "model.h"
+#include "model.h"
 #include "event.h"
 #include "adapters.h"
 #include <stdio.h>
@@ -665,8 +665,14 @@ static void test_model_fwd_validation(void) {
     int tgt_ok[2] = {0, 1};
     int lbl_ok[2] = {1, 2};
 
-    /* valid input */
+    /* valid input - also verify output shapes */
     check("model_fwd valid returns 0", model_fwd(m, src_ok, 2, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == 0);
+    check("enc_out.r == SL", enc_out.r == 2);
+    check("enc_out.c == D", enc_out.c == cfg.D);
+    check("dec_out.r == TL", dec_out.r == 2);
+    check("dec_out.c == D", dec_out.c == cfg.D);
+    check("logits.r == TL", logits.r == 2);
+    check("logits.c == V", logits.c == cfg.V);
 
     /* SL out of range */
     check("model_fwd SL=0 returns -1", model_fwd(m, src_ok, 0, tgt_ok, 2, ec, dc, &enc_out, &dec_out, &logits) == -1);

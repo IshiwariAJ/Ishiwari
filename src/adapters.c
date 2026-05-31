@@ -1,4 +1,4 @@
-﻿#include "adapters.h"
+#include "adapters.h"
 #include <stdio.h>
 
 /* --- ScalarBinAdapter--- */

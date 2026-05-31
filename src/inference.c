@@ -1,4 +1,4 @@
-﻿#include "model.h"
+#include "model.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>

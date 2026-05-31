@@ -62,8 +62,10 @@ int model_fwd(Model *m,
         enc_cur.d = ec[l]->xo.d;  /* point to layer output */
         enc_cur.r = SL; enc_cur.c = D;
     }
-    /* copy final encoder output */
+    /* copy final encoder output and set shape before decoder uses it */
     memcpy(enc_out->d, enc_cur.d, (size_t)SL*D*sizeof(float));
+    enc_out->r = SL;
+    enc_out->c = D;
     mat_del(&enc_in);
 
     /* -- Decoder -- */
@@ -90,8 +92,7 @@ int model_fwd(Model *m,
     mm(dec_out, &proj, logits);
     add_bias(logits, m->proj_b.w);
 
-    /* update output shapes to actual sizes */
-    enc_out->r = SL; enc_out->c = D;
+    /* update remaining output shapes */
     dec_out->r = TL; dec_out->c = D;
     logits->r  = TL; logits->c  = V;
     return 0;
@@ -110,7 +111,6 @@ float model_loss_bwd(Model *m,
                      const Mat *enc_out, const Mat *dec_out,
                      const Mat *logits) {
     int D = m->c.D, V = m->c.V, L = m->c.L, T = m->c.T;
-    (void)enc_out;
 
     /* input validation */
     if (SL <= 0 || SL > T) {
@@ -138,6 +138,22 @@ float model_loss_bwd(Model *m,
             fprintf(stderr, "model_loss_bwd: lbl[%d]=%d out of range [0,%d)\n", i, lbl[i], V);
             return -1.0f;
         }
+    }
+    /* validate input Mat shapes */
+    if (enc_out->r != SL || enc_out->c != D) {
+        fprintf(stderr, "model_loss_bwd: enc_out shape (%d,%d) != expected (%d,%d)\n",
+                enc_out->r, enc_out->c, SL, D);
+        return -1.0f;
+    }
+    if (dec_out->r != TL || dec_out->c != D) {
+        fprintf(stderr, "model_loss_bwd: dec_out shape (%d,%d) != expected (%d,%d)\n",
+                dec_out->r, dec_out->c, TL, D);
+        return -1.0f;
+    }
+    if (logits->r != TL || logits->c != V) {
+        fprintf(stderr, "model_loss_bwd: logits shape (%d,%d) != expected (%d,%d)\n",
+                logits->r, logits->c, TL, V);
+        return -1.0f;
     }
 
     /* softmax + cross-entropy loss, compute d_logits */
